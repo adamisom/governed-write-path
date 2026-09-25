@@ -1,0 +1,41 @@
+[project]
+name = "governed-write-path"
+version = "0.1.0"
+description = "A governed write path for an AI agent that proposes changes to an accounts payable ledger, with an eval harness."
+readme = "README.md"
+authors = [
+    { name = "Adam Isom", email = "10492144+adamisom@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40",
+    "pydantic>=2.10",
+    "pypdf>=5.0",
+    "pyyaml>=6.0",
+    "reportlab>=4.2",
+    "strands-agents==1.57.0",
+]
+
+[project.optional-dependencies]
+# Live model runs through the Anthropic API. Bedrock needs only boto3, which is already a dependency.
+live = ["strands-agents[anthropic]==1.57.0"]
+
+[project.scripts]
+gwp = "gwp.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gwp"]
+
+[dependency-groups]
+dev = [
+    "moto[dynamodb,s3]>=5.2.3",
+    "pytest>=9.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

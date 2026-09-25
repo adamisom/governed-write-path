@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+eval-out/
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+infra/build/
