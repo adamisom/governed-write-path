@@ -146,15 +146,17 @@ class Orchestrator:
         storage_key = f"{tenant_id}/{doc_sha}"
         now = self.clock.now()
         self.blobs.put(storage_key, data, content_type)
+        # The document record goes first, so a run never points at a missing document. If two uploads of
+        # the same bytes race, the loser leaves an unreferenced document record, which is harmless.
+        self.store.put_document({"tenant_id": tenant_id, "document_id": document_id, "sha256": doc_sha,
+                                 "content_type": content_type, "storage_key": storage_key,
+                                 "uploaded_by": principal.principal_id, "uploaded_at": now, "size": len(data)})
         run = {"tenant_id": tenant_id, "run_id": self.ids.new("R"), "document_id": document_id, "run_key": run_key,
                "state": "received", "started_at": now, "outcome": None,
                "history": [{"state": "received", "at": now}]}
         run, created = self.store.create_run(run, run_key)
         if not created:
             return UploadResult(run["run_id"], run["document_id"], True, RunOutcome.DUPLICATE_UPLOAD)
-        self.store.put_document({"tenant_id": tenant_id, "document_id": document_id, "sha256": doc_sha,
-                                 "content_type": content_type, "storage_key": storage_key,
-                                 "uploaded_by": principal.principal_id, "uploaded_at": now, "size": len(data)})
         return UploadResult(run["run_id"], document_id, False)
 
     # -- steps 2 to 13: process --------------------------------------------------------

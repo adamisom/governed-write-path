@@ -294,3 +294,17 @@ def test_staleness_check_lists_old_non_terminal_records(store):
     assert [s["status"] for s in stale] == ["pending_approval"]
     orch.approve("T1", stale[0]["audit_id"], APPROVER, "approve")
     assert orch.stale() == []
+
+
+def test_approving_a_proposal_that_no_longer_fits_the_records_fails_cleanly(store):
+    """Found in review: an approved line naming a PO line that doesn't exist used to raise from approve()."""
+    post = c01_post(params={"lines": [
+        {"source_line": 1, "po_line_no": 9, "account": "6100", "amount_cents": 65000},
+        {"source_line": 2, "po_line_no": 2, "account": "6100", "amount_cents": 19250}]})
+    orch, res, _, _ = run_doc(store, C01_DOC, [post])
+    assert res.outcome == "PENDING_APPROVAL"
+    aid = res.audit_ids[0]
+    assert orch.approve("T1", aid, APPROVER, "approve").status == "failed"
+    audit = store.get_audit("T1", aid)
+    assert audit["status"] == "failed" and audit["error"].startswith("plan_failed")
+    assert len(store.list_payables("T1", "V-101")) == 1

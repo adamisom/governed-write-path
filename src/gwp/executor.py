@@ -98,7 +98,15 @@ class Executor:
             return ExecResult("failed", error=f"no executor for {audit['action']}")
 
         write_id = self.ids.new("W")
-        ops, before, after, apply_record = builder(tenant_id, audit, write_id)
+        try:
+            ops, before, after, apply_record = builder(tenant_id, audit, write_id)
+        except (KeyError, StopIteration, AssertionError, TypeError) as exc:
+            # The proposal no longer fits the records (e.g. an approved line that names no PO line).
+            # Fail this write and record why; never half-build a transaction.
+            error = f"plan_failed:{type(exc).__name__}:{exc}"[:300]
+            s.transition_audit(tenant_id, audit_id, ["proposed", "approved"], "failed", self.clock.now(),
+                               {"error": error}, terminal=True)
+            return ExecResult("failed", error=error)
         at = self.clock.now()
         ops.append(op_put(s.t(RECORDS), {"pk": tenant_pk(tenant_id), "sk": f"XKEY#{xkey}", "kind": "exec_key",
                                          "audit_id": audit_id, "write_id": write_id, "at": at},
