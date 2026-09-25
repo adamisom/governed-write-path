@@ -2,7 +2,10 @@
 
 Five things are compared: the run outcome, the ledger diff (payables, ledger
 entries, receipts and invoice holds, to the cent), the vendor records diff, the
-outbox diff, and the tier and status of every audit record. The retrieval log is checked for
+outbox diff, and the tier and status of every audit record. Ledger entries are
+compared by count and net per account, and each new entry is also checked by
+itself: it balances, it belongs to a payable the run added or changed, and a
+reversal mirrors an entry of the same payable exactly once. The retrieval log is checked for
 cases that name required or forbidden records.
 
 Verdicts:
@@ -39,6 +42,49 @@ def _norm_payable(p: dict) -> dict:
         "total_cents": p["total_cents"], "credits_cents": p.get("credits_cents", 0),
         "lines": sorted([ln.get("kind", "item"), ln["account"], ln["amount_cents"]] for ln in p["lines"]),
     }
+
+
+def _lines_key(lines: list[dict]) -> list:
+    return sorted([ln["account"], ln["debit_cents"], ln["credit_cents"]] for ln in lines)
+
+
+def ledger_problems(base: dict, final: dict) -> list[str]:
+    """Check each new ledger entry by itself, not only the per-account totals.
+
+    A new entry must balance, must belong to a payable this run added or changed, and a reversal must
+    reverse an entry of the same payable, exactly mirrored, and only once. Expected outcomes never list
+    problems, so any problem makes the diff differ from the expected one.
+    """
+    problems = []
+    bp, fp = _items(base, "payable"), _items(final, "payable")
+    touched = {fp[k]["payable_id"] for k in fp if bp.get(k) != fp[k]}
+    all_entries = {e["entry_id"]: e for e in _items(final, "ledger_entry").values()}
+    be = _items(base, "ledger_entry")
+    new = [e for k, e in sorted(_items(final, "ledger_entry").items()) if k not in be]
+    for e in new:
+        eid = e["entry_id"]
+        debits = sum(ln["debit_cents"] for ln in e["lines"])
+        credits = sum(ln["credit_cents"] for ln in e["lines"])
+        if debits != credits or debits == 0:
+            problems.append(f"{eid} unbalanced: debits {debits}, credits {credits}")
+        if e.get("payable_id") not in touched:
+            problems.append(f"{eid} names payable {e.get('payable_id')}, which this run did not add or change")
+        rid = e.get("reverses_entry_id")
+        if rid:
+            orig = all_entries.get(rid)
+            if orig is None:
+                problems.append(f"{eid} reverses {rid}, which does not exist")
+                continue
+            if orig.get("payable_id") != e.get("payable_id"):
+                problems.append(f"{eid} reverses {rid} of payable {orig.get('payable_id')} "
+                                f"but names payable {e.get('payable_id')}")
+            mirrored = [{"account": ln["account"], "debit_cents": ln["credit_cents"],
+                         "credit_cents": ln["debit_cents"]} for ln in orig["lines"]]
+            if _lines_key(e["lines"]) != _lines_key(mirrored):
+                problems.append(f"{eid} does not mirror {rid}")
+    reversed_ids = Counter(e.get("reverses_entry_id") for e in all_entries.values() if e.get("reverses_entry_id"))
+    problems += [f"{rid} reversed {n} times" for rid, n in sorted(reversed_ids.items()) if n > 1]
+    return problems
 
 
 def state_diff(base: dict, final: dict) -> dict:
@@ -79,6 +125,9 @@ def state_diff(base: dict, final: dict) -> dict:
     if new_entries:
         diff["ledger_entries_added"] = len(new_entries)
         diff["ledger_net"] = {a: v for a, v in sorted(net.items())}
+    problems = ledger_problems(base, final)
+    if problems:
+        diff["ledger_problems"] = problems
     if receipts:
         diff["receipts"] = receipts
     if vendors:

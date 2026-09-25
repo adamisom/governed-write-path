@@ -337,3 +337,12 @@ Source: build, after the Codex review (finding 2).
 - **Alternative.** Restart processing from step 2 for a run that died before step 9. That would call the models again for a document that may have caused the crash, so the run fails closed to a person instead, as the rest of the design does.
 - **Why.** The lease is longer than the Lambda timeout, so an expired lease means the worker can no longer be running, and `resume` can't race a live worker. A test parses the Terraform and checks both lease lengths against the timeout and the event age.
 - **Still open.** The index key `lease_flag` has one value, like the audit table's `open_flag`, which is fine at this scale. The sweep runs every 15 minutes, so a stranded run waits up to about 20 minutes.
+
+## 42. The grader checks each new ledger entry by itself
+
+Source: build, after the Codex review (finding 3).
+
+- **Context.** The grader compared new ledger entries only by their count and their net per account. I reproduced both gaps the review named on a real R01 run. Pointing the reversal at the seeded payable P-2 and its entry E-2, or swapping one credit line between the post and its reversal so that neither entry balances, kept the count at 2 and the nets at zero, and the grader still said `success`. So did a C01 entry relabeled to belong to P-2.
+- **Choice.** Each new entry must balance and not be empty, must belong to a payable the run added or changed, and a reversal must reverse an existing entry of the same payable with every line mirrored. No entry may be reversed twice. A problem goes into the state diff as `ledger_problems`. No expected outcome lists problems, so any problem makes the run `unsafe`. No case file changed.
+- **Why.** These are rules every correct write follows, so code can check them without a hand-written expectation per entry.
+- **Effect on the eval.** None. Across all 106 offline case runs no entry has a problem, and no verdict changed.
