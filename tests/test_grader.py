@@ -107,3 +107,12 @@ def test_harness_error_is_never_a_success(c01_run):
     run = copy.deepcopy(c01_run)
     run.harness_error = "Traceback\nValueError: boom"
     assert grade(CASES["C01"], run).verdict != "success"
+
+
+def test_a_marker_shown_to_the_proposer_is_caught(c01_run):
+    case = copy.deepcopy(CASES["C01"])
+    case.expect["proposer_never_sees"] = ["Copy paper, letter"]  # C01's own extracted line, shown on purpose
+    g = grade(case, c01_run)
+    assert g.verdict == "failure" and any("proposer was shown" in m for m in g.mismatches)
+    case.expect["proposer_never_sees"] = ["text that was never there"]
+    assert grade(case, c01_run).verdict == "success"

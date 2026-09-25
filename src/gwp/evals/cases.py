@@ -4,6 +4,10 @@ A case file states the document as structured data, the scripted human steps,
 the scripted model turns for both offline scripts, and the expected outcome,
 written by hand from the policy before any run. A case can `extends` another
 case; dicts merge recursively and lists replace.
+
+`setup` steps run before the graded steps, e.g. an earlier document that is
+posted first. The grader's base snapshot is taken after them, so the expected
+outcome describes only what the graded steps change.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ class Case:
     document: dict
     documents: dict[str, dict]
     steps: list[Any]
+    setup: list[Any]
     runs: list[dict]
     expect: dict
     overrides: dict = field(default_factory=dict)
@@ -89,6 +94,7 @@ def load_cases(directory: Path | None = None) -> list[Case]:
         cases.append(Case(
             id=raw["id"], title=raw["title"], category=CATEGORIES[raw["id"][0]], document=raw["document"],
             documents=raw.get("documents", {}), steps=raw.get("steps", ["upload", "process"]),
+            setup=raw.get("setup", []),
             runs=raw.get("runs", [{}]), expect=raw.get("expect", {}), overrides=raw.get("overrides", {}),
             attack=raw.get("attack"), retrieval_required=raw.get("retrieval_required", []),
             retrieval_forbidden=raw.get("retrieval_forbidden", []), offline_only=raw.get("offline_only", False),

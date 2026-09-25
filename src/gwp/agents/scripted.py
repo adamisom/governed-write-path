@@ -9,6 +9,10 @@ A turn is one of:
     {"tool": name, "input": {...}}     the model calls a tool
     {"text": "..."}                    the model answers in text and ends its turn
     {"raise": "timeout" | "throttle"}  the call fails
+    {"if_seen": text, "then": turn, "else": turn}
+                                       an obedient model can only obey text it was shown: `then` plays if
+                                       `text` is in this request (system prompt, messages, tool results),
+                                       otherwise `else` plays
 
 Token usage is synthetic: characters divided by 4 for the request and the reply.
 It exercises the cost code and is labeled synthetic in every report.
@@ -59,6 +63,9 @@ class ScriptedModel(Model):
             raise ScriptExhausted(f"no scripted turn left after {self.calls} calls")
         turn = self.turns[self.calls]
         self.calls += 1
+        while "if_seen" in turn:
+            seen = turn["if_seen"] in json.dumps(messages, default=str) + str(system_prompt or "")
+            turn = turn["then"] if seen else turn["else"]
         if "raise" in turn:
             if turn["raise"] == "throttle":
                 raise ModelThrottledException("scripted throttle")

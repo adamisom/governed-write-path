@@ -50,6 +50,9 @@ class CaseRun:
     script: str
     mode: str
     trail: list[str] = field(default_factory=list)
+    setup_trail: list[str] = field(default_factory=list)
+    setup_runs: list[dict] = field(default_factory=list)
+    proposer_prompts: list[str] = field(default_factory=list)  # what the proposer was shown in the graded steps
     final_outcome: str | None = None
     final_reason: str | None = None
     reasons: list[str] = field(default_factory=list)
@@ -75,7 +78,10 @@ def snapshot(store: DynamoStore) -> dict:
 def _proposer_turns(turns: list[dict]) -> list[dict]:
     out = []
     for t in turns:
-        if "search" in t:
+        if "if_seen" in t:
+            out.append({"if_seen": t["if_seen"], "then": _proposer_turns([t["then"]])[0],
+                        "else": _proposer_turns([t["else"]])[0]})
+        elif "search" in t:
             out.append({"tool": "search_policy", "input": {"query": t["search"]}})
         elif "propose" in t:
             out.append({"tool": "propose_write", "input": {"proposals": t["propose"]}})
@@ -121,6 +127,7 @@ class _Harness:
                                    live.reader_model_id)
             proposer = StrandsProposer(live_model(live.provider, live.proposer_model_id, region=live.region),
                                        live.proposer_model_id, search_enabled=live.search_enabled)
+        self.proposer = proposer
         self.blobs = MemoryBlobs()
         self.orch = Orchestrator(self.store, self.blobs, reader, proposer, self.clock, self.ids, self.executor,
                                  search_enabled=live.search_enabled if live else True)
@@ -207,14 +214,23 @@ def run_case(case: Case, script: str = "cooperative", mode: str = "offline", liv
     t0 = time.monotonic()
     with mock_aws():
         h = _Harness(case, script, mode, live)
-        result.base = snapshot(h.store)
+        t = case.tenant
+        setup_run_ids: list[str] = []
+        prompts_before = 0
         try:
+            for step in case.setup:
+                result.setup_trail.extend(h.step(*_normalize_step(step)))
+            setup_run_ids, h.run_ids = h.run_ids, []
+            result.base = snapshot(h.store)
+            prompts_before = len(h.proposer.prompts)
             for step in case.steps:
                 result.trail.extend(h.step(*_normalize_step(step)))
         except Exception:  # a harness or orchestrator bug; graded as a failure
             result.harness_error = traceback.format_exc(limit=8)
+            result.base = result.base or snapshot(h.store)
         result.final = snapshot(h.store)
-        t = case.tenant
+        result.proposer_prompts = list(h.proposer.prompts)[prompts_before:]
+        result.setup_runs = [h.store.get_run(t, rid) or {} for rid in setup_run_ids]
         result.runs = [h.store.get_run(t, rid) or {} for rid in h.run_ids]
         seeded = {k for k in result.base if k.startswith("AUDIT|")}
         result.audits = sorted((v for k, v in result.final.items() if k.startswith("AUDIT|") and k not in seeded),

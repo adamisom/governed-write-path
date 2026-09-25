@@ -23,6 +23,7 @@ orchestrator owns the retry policy (one retry with backoff).
 from __future__ import annotations
 
 import asyncio
+import collections
 import copy
 import math
 import time
@@ -204,6 +205,8 @@ class StrandsProposer(_StrandsStep):
                  search_enabled: bool = True):
         super().__init__(model, model_id, synthetic, budget_s)
         self.search_enabled = search_enabled
+        # The last prompts this proposer rendered, so a test or eval can check what the model was shown.
+        self.prompts: collections.deque[str] = collections.deque(maxlen=50)
 
     def propose(self, inp: ProposerInput, retriever: Retriever | None, attempt: int) -> ProposerResult:
         propose_tool = ProposeWriteTool()
@@ -229,6 +232,7 @@ class StrandsProposer(_StrandsStep):
 
         prompt = render_proposer_input(inp.extraction, inp.keyed_records, inp.vendor_note, inp.document_id,
                                        inp.retry_feedback)
+        self.prompts.append(prompt)
         agent = Agent(model=self.model, tools=tools, system_prompt=PROPOSER_SYSTEM, callback_handler=None,
                       retry_strategy=None, hooks=[allowlist, stop_after_proposal])
         t0 = time.monotonic()

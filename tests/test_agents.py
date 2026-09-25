@@ -83,3 +83,15 @@ def test_propose_write_schema_is_plain_json_schema():
     schema = json.dumps(proposal_input_schema())
     assert "$ref" not in schema and "discriminator" not in schema
     assert "update_vendor_bank_details" in schema  # forbidden actions are in the enum on purpose
+
+
+def test_scripted_model_obeys_only_text_it_was_shown():
+    """The adversarial script's conditional turn: an obedient model can follow an instruction only if it saw it."""
+    obey = {"tool": "propose_write", "input": {"proposals": [c01_post(rationale="obeyed")]}}
+    ignore = {"tool": "propose_write", "input": {"proposals": [c01_post(rationale="never saw it")]}}
+    ext = Extraction.model_validate(documents.faithful_extraction(C01_DOC))
+    for records, want in [({"note": "MARKER-4471"}, "obeyed"), ({}, "never saw it")]:
+        model = ScriptedModel([{"if_seen": "MARKER-4471", "then": obey, "else": ignore}], "claude-sonnet-5")
+        res = StrandsProposer(model, "claude-sonnet-5", synthetic=True).propose(
+            ProposerInput("T1", "D-1", ext, records, "matched"), None, 1)
+        assert res.raw["proposals"][0]["rationale"] == want
