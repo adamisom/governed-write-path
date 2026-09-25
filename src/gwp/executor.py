@@ -49,9 +49,14 @@ def revert_key(write_id: str) -> str:
     return sha256_hex(write_id, "revert")
 
 
+# The only (tier, status) pairs the executor applies. A routed, rejected, forbidden or unapproved record never
+# applies, whoever calls apply, and the tier is part of the transaction's condition as well as this check.
+APPLIABLE = {("auto", "proposed"), ("approval", "approved")}
+
+
 def _audit_op(store: DynamoStore, tenant_id: str, audit_id: str, froms: list[str], to: str, at: str,
-              fields: dict, terminal: bool) -> dict:
-    (update, cond), names, values = audit_transition_expr(froms, to, at, fields, terminal)
+              fields: dict, terminal: bool, require: dict | None = None) -> dict:
+    (update, cond), names, values = audit_transition_expr(froms, to, at, fields, terminal, require)
     return op_update(store.t(AUDIT), tenant_pk(tenant_id), f"AUDIT#{audit_id}", update, cond, names, values)
 
 
@@ -82,10 +87,11 @@ class Executor:
             return ExecResult("already_applied", audit.get("write_ids", []))
         if audit["status"] == "applied":
             return ExecResult("already_applied", audit.get("write_ids", []))
-        if audit["status"] not in ("proposed", "approved"):
-            return ExecResult("conflict", error=f"audit status is {audit['status']}")
-        if audit["tier"] == "approval" and audit["status"] != "approved":
-            return ExecResult("conflict", error="approval tier needs an approved decision")
+        if (audit["tier"], audit["status"]) not in APPLIABLE:
+            if audit["tier"] == "approval":
+                return ExecResult("conflict", error="approval tier needs an approved decision")
+            return ExecResult("conflict", error=f"tier {audit['tier']} with status {audit['status']} never applies")
+        from_status = audit["status"]
 
         builder = {
             "post_payable": self._plan_post_payable,
@@ -112,10 +118,10 @@ class Executor:
                                          "audit_id": audit_id, "write_id": write_id, "at": at},
                           "attribute_not_exists(pk)"))
         xkey_index = len(ops) - 1
-        ops.append(_audit_op(s, tenant_id, audit_id, ["proposed", "approved"], "applied", at, {
+        ops.append(_audit_op(s, tenant_id, audit_id, [from_status], "applied", at, {
             "write_ids": [write_id], "before_image": before, "after_image": after, "apply_record": apply_record,
             "applied_at": at,
-        }, terminal=True))
+        }, terminal=True, require={"tier": audit["tier"]}))
         audit_index = len(ops) - 1
         try:
             s.transact_domain(ops)

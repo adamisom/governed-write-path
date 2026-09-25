@@ -422,11 +422,12 @@ class DynamoStore:
 
 
 def audit_transition_expr(from_statuses: Iterable[str], to_status: str, at: str, fields: dict,
-                          terminal: bool) -> tuple[tuple[str, str], dict, dict]:
+                          terminal: bool, require: dict | None = None) -> tuple[tuple[str, str], dict, dict]:
     """Build the update for a guarded audit status change.
 
     Returns ((update_expression, condition_expression), names, values). The
     history list only ever grows. Terminal states drop the sparse index keys.
+    `require` adds equality conditions on other attributes, e.g. the tier.
     """
     froms = list(from_statuses)
     names: dict[str, str] = {"#s": "status", "#h": "history", "#u": "updated_at"}
@@ -450,4 +451,8 @@ def audit_transition_expr(from_statuses: Iterable[str], to_status: str, at: str,
         cond_parts.append(f"#s = :from{i}")
     update = "SET " + ", ".join(sets) + (" REMOVE " + ", ".join(removes) if removes else "")
     condition = "(" + " OR ".join(cond_parts) + ")"
+    for i, (k, v) in enumerate((require or {}).items()):
+        names[f"#r{i}"] = k
+        values[f":r{i}"] = v
+        condition += f" AND #r{i} = :r{i}"
     return (update, condition), names, values

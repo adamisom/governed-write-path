@@ -145,6 +145,52 @@ def test_executor_refuses_an_approval_tier_write_that_was_not_approved(store):
     assert len(store.list_payables("T1", "V-101")) == 1
 
 
+def _hand_built_audit(store, audit_id, tier, status, invoice_number="INV-HAND"):
+    """An audit record written straight to the store, as a buggy or future caller might leave one."""
+    now = "2026-09-25T12:00:00Z"
+    audit = {
+        "audit_id": audit_id, "tenant_id": "T1", "run_id": "R-HAND", "proposal_id": f"R-HAND:{audit_id}",
+        "idempotency_key": audit_id, "created_at": now, "updated_at": now, "document_id": "D-HAND",
+        "document_sha256": "0", "action": "post_payable",
+        "params": {"vendor_id": "V-101", "invoice_number": invoice_number, "invoice_date": "2026-08-03",
+                   "po_id": "PO-7001", "total_cents": 84250},
+        "apply_input": {"lines": [
+            {"line_no": 1, "kind": "item", "account": "6100", "amount_cents": 65000, "po_line_no": 1, "qty": 20,
+             "source_line": 1},
+            {"line_no": 2, "kind": "item", "account": "6100", "amount_cents": 19250, "po_line_no": 2, "qty": 5,
+             "source_line": 2}]},
+        "tier": tier, "tier_rules": [], "checks": {}, "status": status, "write_ids": [], "history": [],
+        "open_flag": "OPEN", "open_since": now,
+    }
+    store.put_audit(audit)
+    return audit
+
+
+@pytest.mark.parametrize("tier,status", [("human", "proposed"), ("forbidden", "proposed"), ("approval", "proposed"),
+                                         ("auto", "approved"), ("human", "approved")])
+def test_executor_applies_only_auto_proposed_or_approval_approved(store, tier, status):
+    """Audit finding 3: a routed or forbidden record at status proposed used to apply."""
+    _hand_built_audit(store, "A-H1", tier, status)
+    res = Executor(store, FakeClock(), Ids()).apply("T1", "A-H1")
+    assert res.status == "conflict"
+    assert [p["payable_id"] for p in store.list_payables("T1", "V-101")] == ["P-2"]
+    assert store.get_audit("T1", "A-H1")["status"] == status
+
+
+def test_the_tier_is_part_of_the_apply_transaction(store):
+    """Even a caller that read a stale or forged tier can't apply: the transaction checks the stored tier."""
+    stored = _hand_built_audit(store, "A-H2", "human", "proposed")
+    real_get_audit = store.get_audit
+    store.get_audit = lambda t, a: dict(stored, tier="auto")  # the caller believes the record is auto
+    try:
+        res = Executor(store, FakeClock(), Ids()).apply("T1", "A-H2")
+    finally:
+        store.get_audit = real_get_audit
+    assert res.status == "conflict"
+    assert [p["payable_id"] for p in store.list_payables("T1", "V-101")] == ["P-2"]
+    assert store.get_key("T1", "INVKEY#V-101#INVHAND") is None
+
+
 # -- idempotency ----------------------------------------------------------------------
 
 
