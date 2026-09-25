@@ -25,8 +25,12 @@ from .store import AUDIT, RECORDS, DynamoStore, TransactionConflict, audit_trans
 from .world import normalize_ref
 
 
-class SimulatedCrash(Exception):
-    """Raised by the fault hook after a commit, before the executor acknowledges it."""
+class SimulatedCrash(BaseException):
+    """Raised by the fault hook after a commit, before the executor acknowledges it.
+
+    It is a BaseException so that it escapes the orchestrator's fail-closed
+    handler, the way a process that dies escapes every handler.
+    """
 
 
 @dataclass
@@ -72,6 +76,10 @@ class Executor:
         audit = s.get_audit(tenant_id, audit_id)
         if audit is None:
             return ExecResult("failed", error="no_such_audit")
+        xkey = execution_key(tenant_id, audit["proposal_id"], audit["action"])
+        if s.get_key(tenant_id, f"XKEY#{xkey}") is not None:
+            # A redelivered execution finds its key and does nothing.
+            return ExecResult("already_applied", audit.get("write_ids", []))
         if audit["status"] == "applied":
             return ExecResult("already_applied", audit.get("write_ids", []))
         if audit["status"] not in ("proposed", "approved"):
@@ -91,7 +99,6 @@ class Executor:
 
         write_id = self.ids.new("W")
         ops, before, after, apply_record = builder(tenant_id, audit, write_id)
-        xkey = execution_key(tenant_id, audit["proposal_id"], audit["action"])
         at = self.clock.now()
         ops.append(op_put(s.t(RECORDS), {"pk": tenant_pk(tenant_id), "sk": f"XKEY#{xkey}", "kind": "exec_key",
                                          "audit_id": audit_id, "write_id": write_id, "at": at},
