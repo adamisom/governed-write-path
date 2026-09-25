@@ -244,19 +244,23 @@ class Executor:
                  "write_id": write_id, "reverses_entry_id": None,
                  "lines": [{"account": prm["account"], "debit_cents": line["amount_cents"], "credit_cents": 0},
                            {"account": line["account"], "debit_cents": 0, "credit_cents": line["amount_cents"]}]}
+        # The line remembers which recode set its account last. A recode revert is allowed only from the top of
+        # that stack, so reverting an earlier recode can never clobber a later one on the same line.
         ops = [
             op_update(s.t(RECORDS), pk, f"PAYABLE#{payable['payable_id']}",
-                      f"SET #ln[{idx}].account = :acct, version = version + :one ADD dependents :w",
+                      f"SET #ln[{idx}].account = :acct, #ln[{idx}].last_recode_write_id = :wid, "
+                      "version = version + :one ADD dependents :w",
                       "#st = :open AND version = :v", names={"#ln": "lines", "#st": "status"},
-                      values={":acct": prm["account"], ":one": 1, ":w": {write_id}, ":open": "open",
-                              ":v": payable["version"]}),
+                      values={":acct": prm["account"], ":wid": write_id, ":one": 1, ":w": {write_id},
+                              ":open": "open", ":v": payable["version"]}),
             op_put(s.t(RECORDS), {"pk": pk, "sk": f"ENTRY#{entry_id}", "kind": "ledger_entry", **entry},
                    "attribute_not_exists(pk)"),
         ]
         before = {"payable_id": payable["payable_id"], "line_no": prm["line_no"], "account": line["account"]}
         after = {"payable_id": payable["payable_id"], "line_no": prm["line_no"], "account": prm["account"]}
         record = {"payable_id": payable["payable_id"], "line_index": idx, "entry_id": entry_id,
-                  "old_account": line["account"], "new_account": prm["account"], "amount_cents": line["amount_cents"]}
+                  "old_account": line["account"], "new_account": prm["account"], "amount_cents": line["amount_cents"],
+                  "prev_recode_write_id": line.get("last_recode_write_id")}
         return ops, before, after, record
 
     def _plan_vendor_query(self, tenant_id: str, audit: dict, write_id: str):
@@ -331,13 +335,30 @@ class Executor:
                                  names={"#st": "status"}, values={":rev": "reversed", ":applied": "applied"}))
         elif action == "recode_line":
             payable = s.get_payable(tenant_id, rec["payable_id"])
-            assert payable is not None
+            idx = rec["line_index"]
+            if payable is None or payable["status"] != "open":
+                return self._refuse(tenant_id, audit_id, requested_by, "not_open")
+            line = payable["lines"][idx]
+            if line.get("last_recode_write_id") != write_id or line["account"] != rec["new_account"]:
+                # A later recode of the same line is applied. Revert that one first.
+                return self._refuse(tenant_id, audit_id, requested_by, "dependent_write")
             ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
+            prev = rec.get("prev_recode_write_id")
+            values = {":old": rec["old_account"], ":one": 1, ":w": {write_id}, ":v": payable["version"],
+                      ":me": write_id, ":new": rec["new_account"], ":open": "open"}
+            if prev:
+                values[":prev"] = prev
+                marker = f"SET #ln[{idx}].last_recode_write_id = :prev, "
+                tail = ""
+            else:
+                marker = "SET "
+                tail = f" REMOVE #ln[{idx}].last_recode_write_id"
             ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
-                                 f"SET #ln[{rec['line_index']}].account = :old, version = version + :one "
-                                 "DELETE dependents :w", "version = :v", names={"#ln": "lines"},
-                                 values={":old": rec["old_account"], ":one": 1, ":w": {write_id},
-                                         ":v": payable["version"]}))
+                                 marker + f"#ln[{idx}].account = :old, version = version + :one" + tail
+                                 + " DELETE dependents :w",
+                                 f"#st = :open AND version = :v AND #ln[{idx}].last_recode_write_id = :me "
+                                 f"AND #ln[{idx}].account = :new",
+                                 names={"#ln": "lines", "#st": "status"}, values=values))
         elif action == "send_vendor_query":
             msg = s.get_outbox(tenant_id, rec["message_id"])
             if msg is None or msg["status"] != "queued":

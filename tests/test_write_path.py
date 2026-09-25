@@ -280,9 +280,119 @@ def test_revert_of_a_queued_message_cancels_it_but_a_sent_one_is_refused(store):
     assert orch.executor.deliver_outbox("T1") == []
 
 
-def test_revert_refused_while_a_later_write_depends_on_it(store):
+def test_revert_of_a_payable_with_no_dependent_write_succeeds(store):
     orch, _, _ = build(store, [], [])
     assert orch.revert("T1", "A-2", APPROVER).outcome == "REVERTED"  # nothing depends on P-2 yet
+
+
+def test_revert_refused_while_a_later_write_depends_on_it(store):
+    """Audit finding 11: this test used to assert REVERTED. A credit memo against P-2 now comes first."""
+    memo = {"kind": "credit_memo", "vendor_name": "Pine Street Paper Supply", "vendor_tax_id": "84-2210937",
+            "invoice_number": "CM-17", "invoice_date": "2026-08-12", "referenced_invoice_numbers": ["INV-5521"],
+            "lines": [{"description": "Toner cartridge, black (returned)", "qty": 2, "unit_price_cents": 3850}]}
+    credit = {"action": "apply_credit_memo", "params": {"credit_number": "CM-17", "payable_id": "P-2",
+                                                        "amount_cents": 7700}, "rationale": "r", "confidence": 0.9}
+    orch, res, _, _ = run_doc(store, memo, [credit])
+    assert orch.approve("T1", res.audit_ids[0], APPROVER, "approve").status == "applied"
+    out = orch.revert("T1", "A-2", APPROVER)
+    assert out.outcome == "REVERT_REFUSED" and out.reason == "dependent_write"
+    assert store.get_payable("T1", "P-2")["status"] == "open"
+
+
+# -- recode and hold: apply and revert (audit findings 2 and 10) ------------------------------------
+
+KESTREL_DOC = {"kind": "invoice", "vendor_name": "Kestrel Office Furniture", "vendor_tax_id": "84-3310442",
+               "remit_to_bank_last4": "7730", "invoice_number": "KOF-9", "invoice_date": "2026-08-10",
+               "po_number": "PO-7009", "lines": [{"description": "Filing cabinet, 4 drawer", "qty": 4,
+                                                   "unit_price_cents": 21000}]}
+KESTREL_POST = {"action": "post_payable", "params": {
+    "vendor_id": "V-102", "invoice_number": "KOF-9", "invoice_date": "2026-08-10", "po_id": "PO-7009",
+    "total_cents": 84000, "lines": [{"source_line": 1, "po_line_no": 1, "account": "6150", "amount_cents": 84000}]},
+    "rationale": "ok", "confidence": 0.9}
+
+
+def _letter(n):
+    return {"kind": "letter", "vendor_name": "Kestrel Office Furniture", "vendor_tax_id": "84-3310442",
+            "letter_date": "2026-08-20", "body": [f"Coding note {n} for invoice KOF-9."]}
+
+
+def _recode(pid, account):
+    return {"action": "recode_line", "params": {"payable_id": pid, "line_no": 1, "account": account},
+            "rationale": "recode", "confidence": 0.9}
+
+
+def _kestrel_with_recodes(store, accounts):
+    """Post KOF-9 at 6150, then one letter run per account, each proposing a recode of line 1. One orchestrator,
+    so ids don't collide."""
+    docs = [KESTREL_DOC] + [_letter(i) for i in range(len(accounts))]
+    orch, rm, pm = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(d)} for d in docs],
+                         [{"tool": "propose_write", "input": {"proposals": [KESTREL_POST]}}])
+    up = orch.upload("T1", documents.render(KESTREL_DOC), "application/pdf", UPLOADER)
+    res = orch.process("T1", up.run_id)
+    assert res.outcome == "APPLIED"
+    pid = store.get_audit("T1", res.audit_ids[0])["apply_record"]["payable_id"]
+    recodes = []
+    for i, acct in enumerate(accounts):
+        pm.turns.append({"tool": "propose_write", "input": {"proposals": [_recode(pid, acct)]}})
+        up = orch.upload("T1", documents.render(_letter(i)), "application/pdf", UPLOADER)
+        r = orch.process("T1", up.run_id)
+        assert r.outcome == "APPLIED", r
+        recodes.append(r.audit_ids[0])
+    return orch, pid, res.audit_ids[0], recodes
+
+
+def _net(store, pid):
+    net: dict = {}
+    for e in store.list_ledger("T1"):
+        if e["payable_id"] == pid:
+            for ln in e["lines"]:
+                net[ln["account"]] = net.get(ln["account"], 0) + ln["debit_cents"] - ln["credit_cents"]
+    return {a: v for a, v in net.items() if v}
+
+
+def test_recode_applies_and_reverts(store):
+    orch, pid, post_aid, (rec,) = _kestrel_with_recodes(store, ["1500"])
+    assert store.get_payable("T1", pid)["lines"][0]["account"] == "1500"
+    assert store.get_audit("T1", rec)["tier"] == "auto"
+    assert _net(store, pid) == {"1500": 84000, "2000": -84000}
+    # The payable can't be reverted while the recode depends on it.
+    assert orch.revert("T1", post_aid, APPROVER).reason == "dependent_write"
+    assert orch.revert("T1", rec, APPROVER).outcome == "REVERTED"
+    assert store.get_payable("T1", pid)["lines"][0]["account"] == "6150"
+    assert _net(store, pid) == {"6150": 84000, "2000": -84000}
+    assert orch.revert("T1", post_aid, APPROVER).outcome == "REVERTED"
+
+
+def test_reverting_an_earlier_recode_is_refused_while_a_later_one_on_the_line_stands(store):
+    """Audit finding 2: reverting recode A after recode B left the line at 1500 while the ledger said 6150."""
+    orch, pid, _, (a, b) = _kestrel_with_recodes(store, ["1500", "6150"])
+    out = orch.revert("T1", a, APPROVER)
+    assert out.outcome == "REVERT_REFUSED" and out.reason == "dependent_write"
+    assert store.get_payable("T1", pid)["lines"][0]["account"] == "6150"
+    assert orch.revert("T1", b, APPROVER).outcome == "REVERTED"
+    assert store.get_payable("T1", pid)["lines"][0]["account"] == "1500"
+    assert _net(store, pid) == {"1500": 84000, "2000": -84000}
+    assert orch.revert("T1", a, APPROVER).outcome == "REVERTED"
+    line = store.get_payable("T1", pid)["lines"][0]
+    assert line["account"] == "6150" and "last_recode_write_id" not in line
+    assert _net(store, pid) == {"6150": 84000, "2000": -84000}  # the payable and the ledger agree
+
+
+def test_hold_applies_and_reverts_by_release(store):
+    doc = {**C01_DOC, "invoice_number": "INV-HOLD"}
+    orch, rm, pm = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(doc)}], [])
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    pm.turns.append({"tool": "propose_write", "input": {"proposals": [
+        {"action": "hold_invoice", "params": {"document_id": up.document_id, "reason_code": "awaiting_receipt"},
+         "rationale": "hold", "confidence": 0.9}]}})
+    res = orch.process("T1", up.run_id)
+    assert res.outcome == "APPLIED"
+    audit = store.get_audit("T1", res.audit_ids[0])
+    assert (audit["tier"], audit["status"]) == ("auto", "applied")
+    assert store.get_key("T1", f"HOLD#{up.document_id}")["status"] == "on_hold"
+    assert orch.revert("T1", res.audit_ids[0], APPROVER).outcome == "REVERTED"
+    assert store.get_key("T1", f"HOLD#{up.document_id}")["status"] == "released"
+    assert orch.revert("T1", res.audit_ids[0], APPROVER).already
 
 
 # -- degradation and fail-closed ------------------------------------------------------------
