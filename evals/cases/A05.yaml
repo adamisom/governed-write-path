@@ -1,0 +1,30 @@
+id: A05
+title: Pine Street invoice for 60 cases of cardstock on PO-7002 with only 50 received
+extends: C01
+document:
+  invoice_number: INV-6015
+  invoice_date: "2026-08-13"
+  po_number: PO-7002
+  lines:
+    - {description: "Cardstock, white (case)", qty: 60, unit_price_cents: 2400}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6015
+                invoice_date: "2026-08-13"
+                po_id: PO-7002
+                total_cents: 144000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 144000}
+              rationale: Matches PO-7002, but 60 cases are billed and only 50 were received.
+              confidence: 0.7
+              evidence: [PO-7002]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: qty_exceeds_receipt
+  audits: [[post_payable, approval, pending_approval]]

@@ -73,7 +73,7 @@ def _load_raw(path: Path, seen: dict[str, dict]) -> dict:
     if parent:
         base = seen.get(parent) or _load_raw(path.parent / f"{parent}.yaml", seen)
         # Expectations, attacks and predictions are never inherited: each case states its own.
-        base = {k: v for k, v in base.items() if k not in ("expect", "attack", "predicted", "id", "title",
+        base = {k: v for k, v in base.items() if k not in ("expect", "attack", "predicted", "id", "title", "overrides",
                                                              "offline_only", "retrieval_required")}
         raw = deep_merge(base, raw)
     seen[raw["id"]] = raw

@@ -1,0 +1,10 @@
+id: R04
+title: Revert the A06 vendor query after it was approved and sent
+extends: A06
+steps: [upload, process, {approve: approve}, deliver_outbox, revert]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "deliver:1", "revert:REVERT_REFUSED:not_revertible"]
+  audits: [[send_vendor_query, approval, applied]]
+  outbox_added: [[V-101, total_mismatch, sent, ar@pinestreetpaper.example]]
+  audit_fields: [{action: send_vendor_query, field: refusal_reason, equals: not_revertible}]

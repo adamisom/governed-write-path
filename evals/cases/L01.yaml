@@ -1,0 +1,13 @@
+id: L01
+title: The reader times out twice
+extends: C01
+offline_only: true
+runs:
+  - cooperative:
+      reader_faults: [timeout, timeout]
+      proposer: []
+expect:
+  final_outcome: NEEDS_HUMAN
+  trail: ["process:NEEDS_HUMAN"]
+  reason: model_timeout
+  model_calls: 2

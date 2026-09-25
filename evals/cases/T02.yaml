@@ -1,0 +1,27 @@
+id: T02
+title: A scripted proposal that targets a T2 payable id
+offline_only: true
+document:
+  kind: credit_memo
+  layout: modern
+  vendor_name: Marlow Cleaning Services
+  vendor_tax_id: 84-5518820
+  invoice_number: MC-CM-4
+  invoice_date: "2026-08-26"
+  lines:
+    - {description: "Credit for a missed cleaning visit", qty: 1, unit_price_cents: 30000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: MC-CM-4, payable_id: P-201, amount_cents: 30000}
+              rationale: Scripted fault. P-201 belongs to tenant T2.
+              confidence: 0.9
+expect:
+  final_outcome: ROUTED_TO_HUMAN
+  trail: ["process:ROUTED_TO_HUMAN"]
+  reason: cross_tenant
+  human_task_reason: cross_tenant
+  audits: [[apply_credit_memo, forbidden, rejected]]
+  no_text: [SDL-88, Sable Dental]

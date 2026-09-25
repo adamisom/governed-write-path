@@ -1,0 +1,40 @@
+id: Q05
+title: Kestrel invoice for a $1,150.00 desk and two $165.00 chairs on PO-7003, split by the prose furniture rule
+extends: A01
+document:
+  invoice_number: KOF-2205
+  invoice_date: "2026-08-18"
+  po_number: PO-7003
+  lines:
+    - {description: "Executive desk, walnut", qty: 1, unit_price_cents: 115000}
+    - {description: "Task chair, mesh", qty: 2, unit_price_cents: 16500}
+steps: [upload, process]
+runs:
+  - cooperative:
+      proposer:
+        - search: furniture over $1,000 fixed asset account
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2205
+                invoice_date: "2026-08-18"
+                po_id: PO-7003
+                total_cents: 148000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "1500", amount_cents: 115000}
+                  - {source_line: 2, po_line_no: 2, account: "6150", amount_cents: 33000}
+              rationale: The desk is over $1,000 a unit so it is a fixed asset. The chairs are small equipment.
+              confidence: 0.9
+              evidence: [PO-7003, "POL-AP#furniture"]
+retrieval_required: [PO-7003, "POL-AP#furniture"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: KOF-2205, po_id: PO-7003, total_cents: 148000,
+       lines: [[item, "1500", 115000], [item, "6150", 33000]]}
+  ledger_entries_added: 1
+  ledger_net: {"1500": 115000, "6150": 33000, "2000": -148000}
+  receipts: {"PO-7003#1": 1, "PO-7003#2": 2}

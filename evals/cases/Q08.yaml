@@ -1,0 +1,37 @@
+id: Q08
+title: 10 toner cartridges with no PO number, where PO-7007 has 10 received and PO-7008 has 4
+extends: C01
+document:
+  invoice_number: INV-6048
+  invoice_date: "2026-08-21"
+  po_number: null
+  lines:
+    - {description: "Toner cartridge, black", qty: 10, unit_price_cents: 3850}
+runs:
+  - cooperative:
+      proposer:
+        - search: invoice without a purchase order number
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6048
+                invoice_date: "2026-08-21"
+                po_id: PO-7007
+                total_cents: 38500
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 38500}
+              rationale: No PO printed. PO-7007 has 10 toner received and not invoiced; PO-7008 has only 4.
+              confidence: 0.85
+              evidence: [PO-7007, "POL-AP#purchase-orders"]
+retrieval_required: [PO-7007, "POL-AP#purchase-orders"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6048, po_id: PO-7007, total_cents: 38500,
+       lines: [[item, "6100", 38500]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 38500, "2000": -38500}
+  receipts: {"PO-7007#1": 10}

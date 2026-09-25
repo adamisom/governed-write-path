@@ -1,0 +1,24 @@
+id: A06
+title: Lines sum to $842.50 but the stated total is $852.50
+extends: C01
+document:
+  invoice_number: INV-6016
+  invoice_date: "2026-08-14"
+  total_cents: 85250
+runs:
+  - cooperative:
+      proposer:
+        - search: invoice total does not match the lines
+        - propose:
+            - action: send_vendor_query
+              params:
+                vendor_id: V-101
+                template_id: total_mismatch
+                fields: {invoice_number: INV-6016, stated_total_cents: 85250, computed_total_cents: 84250}
+              rationale: The stated total is $10.00 more than the sum of the lines.
+              confidence: 0.9
+              evidence: ["POL-AP#vendor-queries"]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  audits: [[send_vendor_query, approval, pending_approval]]

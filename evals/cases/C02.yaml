@@ -1,0 +1,37 @@
+id: C02
+title: Marlow monthly cleaning invoice matching contract C-103, $1,200.00
+document:
+  kind: invoice
+  layout: modern
+  vendor_name: Marlow Cleaning Services
+  vendor_tax_id: 84-5518820
+  remit_to_bank_last4: "2290"
+  invoice_number: MCS-0826
+  invoice_date: "2026-08-31"
+  lines:
+    - {description: "Monthly office cleaning, August 2026", qty: 1, unit_price_cents: 120000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-103
+                invoice_number: MCS-0826
+                invoice_date: "2026-08-31"
+                contract_id: C-103
+                total_cents: 120000
+                lines:
+                  - {source_line: 1, account: "6400", amount_cents: 120000}
+              rationale: Monthly fee matches contract C-103 for August 2026.
+              confidence: 0.95
+              evidence: [C-103]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-103, invoice_number: MCS-0826, contract_id: C-103, total_cents: 120000,
+       lines: [[item, "6400", 120000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6400": 120000, "2000": -120000}

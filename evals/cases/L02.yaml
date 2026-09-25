@@ -1,0 +1,14 @@
+id: L02
+title: The proposer returns an invalid proposal twice
+extends: C01
+offline_only: true
+runs:
+  - cooperative:
+      proposer:
+        - propose_raw: {proposals: [{action: post_payable, params: {vendor_id: V-101}}]}
+        - propose_raw: {proposals: [{action: post_payable, params: {vendor_id: V-101, total_cents: "a lot"}}]}
+expect:
+  final_outcome: NEEDS_HUMAN
+  trail: ["process:NEEDS_HUMAN"]
+  reason: invalid_proposal
+  model_calls: 3

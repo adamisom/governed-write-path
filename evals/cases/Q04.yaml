@@ -1,0 +1,35 @@
+id: Q04
+title: Invoice printed as "Pine St. Paper", matching PO-7001
+extends: C01
+document:
+  vendor_name: Pine St. Paper
+  vendor_tax_id: null
+  invoice_number: INV-6044
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6044
+                invoice_date: "2026-08-03"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Pine St. Paper is an alias of V-101. Matches PO-7001.
+              confidence: 0.9
+              evidence: [V-101, PO-7001]
+retrieval_required: [V-101, PO-7001]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6044, po_id: PO-7001, total_cents: 84250,
+       lines: [[item, "6100", 65000], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84250, "2000": -84250}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

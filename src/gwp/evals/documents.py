@@ -157,7 +157,7 @@ def render(spec: dict) -> bytes:
             text(480, "Amount", bold=True)
             y -= 16
             for row in page_rows:
-                text(50, row["description"][:60])
+                text(50, row["description"])
                 text(330, str(row["qty"]))
                 text(380, money(row["unit_price_cents"], layout))
                 text(480, money(row["amount_cents"], layout))

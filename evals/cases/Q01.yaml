@@ -1,0 +1,38 @@
+id: Q01
+title: Oakridge invoice dated 8/1/26 for $2,200.00, after the contract price rose
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Oakridge IT Services
+  vendor_tax_id: 84-6620113
+  remit_to_bank_last4: "5567"
+  invoice_number: OIT-0801
+  invoice_date: "2026-08-01"
+  lines:
+    - {description: "Managed IT support, August 2026", qty: 1, unit_price_cents: 220000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-104
+                invoice_number: OIT-0801
+                invoice_date: "2026-08-01"
+                contract_id: C-104
+                total_cents: 220000
+                lines:
+                  - {source_line: 1, account: "6500", amount_cents: 220000}
+              rationale: Contract C-104 charges $2,200 a month from 7/1/26.
+              confidence: 0.9
+              evidence: [C-104]
+retrieval_required: [C-104]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-104, invoice_number: OIT-0801, contract_id: C-104, total_cents: 220000,
+       lines: [[item, "6500", 220000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6500": 220000, "2000": -220000}

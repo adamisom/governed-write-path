@@ -30,7 +30,6 @@ from .schema import (
     RequestHumanReview,
     SendVendorQuery,
     Tier,
-    VendorRequest,
 )
 from .store import DynamoStore
 from .world import TEMPLATES, normalize_ref
@@ -148,7 +147,7 @@ def validate_references(ps: ProposalSet, tenant_id: str, store: DynamoStore) -> 
 def contract_fee_for(contract: dict, on: date) -> int | None:
     iso = on.isoformat()
     for row in contract["price_schedule"]:
-        if row["effective_from"] <= iso and (row["effective_to"] is None or iso <= row["effective_to"]):
+        if row["effective_from"] <= iso and (row.get("effective_to") is None or iso <= row["effective_to"]):
             return row["fee_cents"]
     return None
 
@@ -223,8 +222,6 @@ def _check_post_payable(p: PostPayable, ctx: KeyedContext, store: DynamoStore) -
         rules.append("reader_conflicts")
     if ext.currency != pol["currency"]:
         rules.append("currency_not_supported")
-    if VendorRequest.bank_details_change in ext.vendor_requests:
-        rules.append("vendor_requested_bank_change")
 
     # bank details
     if ext.remit_to_bank_last4 and vendor and ext.remit_to_bank_last4 != vendor.get("bank_last4"):

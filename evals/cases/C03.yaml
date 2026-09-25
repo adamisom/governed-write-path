@@ -1,0 +1,36 @@
+id: C03
+title: Pine Street invoice with toner 1.5% over the PO price, $845.40 (within the 2% tolerance)
+extends: C01
+document:
+  invoice_number: INV-6003
+  invoice_date: "2026-08-05"
+  lines:
+    - {description: "Copy paper, letter (ream)", qty: 20, unit_price_cents: 3250}
+    - {description: "Toner cartridge, black", qty: 5, unit_price_cents: 3908}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6003
+                invoice_date: "2026-08-05"
+                po_id: PO-7001
+                total_cents: 84540
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19540}
+              rationale: Matches PO-7001. Toner is 1.5% over the PO price, inside the 2% tolerance.
+              confidence: 0.9
+              evidence: [PO-7001]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6003, po_id: PO-7001, total_cents: 84540,
+       lines: [[item, "6100", 65000], [item, "6100", 19540]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84540, "2000": -84540}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

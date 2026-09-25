@@ -1,0 +1,14 @@
+id: D01
+title: The C01 PDF uploaded twice with identical bytes
+extends: C01
+steps: [upload, process, upload]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED", "upload:DUPLICATE_UPLOAD"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6001, po_id: PO-7001, total_cents: 84250,
+       lines: [[item, "6100", 65000], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84250, "2000": -84250}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

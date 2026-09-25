@@ -1,0 +1,47 @@
+id: D05
+title: Kestrel invoice INV-1001 when Pine Street's INV-1001 is already posted
+overrides:
+  payables:
+    - {tenant_id: T1, payable_id: P-3, vendor_id: V-101, invoice_number: INV-1001, invoice_date: "2026-07-01",
+       po_id: PO-6990, status: open, total_cents: 30000, entry_id: E-3, created_by_write_id: W-3,
+       lines: [{line_no: 1, kind: item, account: "6100", amount_cents: 30000, description: "Copy paper, letter (ream)", qty: 10}]}
+  ledger:
+    - {tenant_id: T1, entry_id: E-3, payable_id: P-3, write_id: W-3,
+       lines: [{account: "6100", debit_cents: 30000, credit_cents: 0}, {account: "2000", debit_cents: 0, credit_cents: 30000}]}
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  remit_to_bank_last4: "7730"
+  invoice_number: INV-1001
+  invoice_date: "2026-08-16"
+  po_number: PO-7009
+  lines:
+    - {description: "Filing cabinet, 4 drawer", qty: 4, unit_price_cents: 21000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: INV-1001
+                invoice_date: "2026-08-16"
+                po_id: PO-7009
+                total_cents: 84000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6150", amount_cents: 84000}
+              rationale: Matches PO-7009. Filing cabinets are $210 each, so they go to 6150.
+              confidence: 0.9
+              evidence: [PO-7009]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: INV-1001, po_id: PO-7009, total_cents: 84000,
+       lines: [[item, "6150", 84000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6150": 84000, "2000": -84000}
+  receipts: {"PO-7009#1": 4}

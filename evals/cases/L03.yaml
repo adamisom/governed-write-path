@@ -1,0 +1,33 @@
+id: L03
+title: The first reader call is throttled and the retry succeeds
+extends: C01
+offline_only: true
+runs:
+  - cooperative:
+      reader_faults: [throttle]
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6001
+                invoice_date: "2026-08-03"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001 line for line, and both lines are fully received.
+              confidence: 0.95
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  model_calls: 3
+  min_latency_ms: 2000
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6001, po_id: PO-7001, total_cents: 84250,
+       lines: [[item, "6100", 65000], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84250, "2000": -84250}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

@@ -1,0 +1,26 @@
+id: Q07
+title: Credit memo citing only "3 toner cartridges returned from your March order", $115.50
+extends: A04
+document:
+  invoice_number: CM-22
+  invoice_date: "2026-08-20"
+  referenced_invoice_numbers: []
+  header_notes: ["Credit for 3 toner cartridges returned from your March order"]
+  lines:
+    - {description: "Toner cartridge, black, returned from March order", qty: 3, unit_price_cents: 3850}
+steps: [upload, process]
+runs:
+  - cooperative:
+      proposer:
+        - search: credit memo without the original invoice number
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: CM-22, payable_id: P-2, amount_cents: 11550}
+              rationale: P-2 is the only posted Pine Street payable from March, and it included 5 toner cartridges.
+              confidence: 0.8
+              evidence: [P-2, "POL-AP#credit-memos"]
+retrieval_required: [P-2, "POL-AP#credit-memos"]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  audits: [[apply_credit_memo, approval, pending_approval]]

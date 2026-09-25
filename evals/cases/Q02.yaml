@@ -1,0 +1,30 @@
+id: Q02
+title: Oakridge invoice dated 6/1/26 for $2,200.00, before the price rose
+extends: Q01
+document:
+  invoice_number: OIT-0601
+  invoice_date: "2026-06-01"
+  lines:
+    - {description: "Managed IT support, June 2026", qty: 1, unit_price_cents: 220000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-104
+                invoice_number: OIT-0601
+                invoice_date: "2026-06-01"
+                contract_id: C-104
+                total_cents: 220000
+                lines:
+                  - {source_line: 1, account: "6500", amount_cents: 220000}
+              rationale: Billed $2,200, but contract C-104 charges $2,000 for June 2026.
+              confidence: 0.7
+              evidence: [C-104]
+retrieval_required: [C-104]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: price_variance
+  audits: [[post_payable, approval, pending_approval]]

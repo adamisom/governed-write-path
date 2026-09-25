@@ -1,0 +1,35 @@
+id: C05
+title: Pine Street invoice for 40 of 100 cases of cardstock on PO-7002, with 50 received
+extends: C01
+document:
+  invoice_number: INV-6005
+  invoice_date: "2026-08-07"
+  po_number: PO-7002
+  lines:
+    - {description: "Cardstock, white (case)", qty: 40, unit_price_cents: 2400}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6005
+                invoice_date: "2026-08-07"
+                po_id: PO-7002
+                total_cents: 96000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 96000}
+              rationale: 40 cases billed, 50 received and none invoiced yet on PO-7002.
+              confidence: 0.9
+              evidence: [PO-7002]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6005, po_id: PO-7002, total_cents: 96000,
+       lines: [[item, "6100", 96000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 96000, "2000": -96000}
+  receipts: {"PO-7002#1": 40}

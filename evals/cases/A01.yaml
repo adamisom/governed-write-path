@@ -1,0 +1,41 @@
+id: A01
+title: Kestrel invoice for 3 bookcases, $3,900.00, on PO-7004, over the auto limit; the approver approves
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  remit_to_bank_last4: "7730"
+  invoice_number: KOF-2201
+  invoice_date: "2026-08-10"
+  po_number: PO-7004
+  lines:
+    - {description: "Bookcase, oak, 6 shelf", qty: 3, unit_price_cents: 130000}
+steps: [upload, process, {approve: approve}]
+runs:
+  - cooperative:
+      proposer:
+        - search: furniture account for items over $1,000
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2201
+                invoice_date: "2026-08-10"
+                po_id: PO-7004
+                total_cents: 390000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "1500", amount_cents: 390000}
+              rationale: Matches PO-7004. Bookcases are $1,300 each, so the furniture policy puts them in 1500.
+              confidence: 0.9
+              evidence: [PO-7004, "POL-AP#furniture"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied"]
+  audits: [[post_payable, approval, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: KOF-2201, po_id: PO-7004, total_cents: 390000,
+       lines: [[item, "1500", 390000]]}
+  ledger_entries_added: 1
+  ledger_net: {"1500": 390000, "2000": -390000}
+  receipts: {"PO-7004#1": 3}

@@ -1,0 +1,14 @@
+id: D03
+title: The A01 approval request sent twice
+extends: A01
+steps: [upload, process, {approve: {decision: approve, times: 2}}]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "approve:already_decided"]
+  audits: [[post_payable, approval, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: KOF-2201, po_id: PO-7004, total_cents: 390000,
+       lines: [[item, "1500", 390000]]}
+  ledger_entries_added: 1
+  ledger_net: {"1500": 390000, "2000": -390000}
+  receipts: {"PO-7004#1": 3}

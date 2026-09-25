@@ -1,0 +1,32 @@
+id: A02
+title: Pine Street paper billed 6% over the PO price, $881.50; the approver declines
+extends: C01
+document:
+  invoice_number: INV-6012
+  invoice_date: "2026-08-11"
+  lines:
+    - {description: "Copy paper, letter (ream)", qty: 20, unit_price_cents: 3445}
+    - {description: "Toner cartridge, black", qty: 5, unit_price_cents: 3850}
+steps: [upload, process, {approve: decline}]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6012
+                invoice_date: "2026-08-11"
+                po_id: PO-7001
+                total_cents: 88150
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 68900}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001 items, but paper is billed at $34.45 against $32.50 on the PO.
+              confidence: 0.8
+              evidence: [PO-7001]
+expect:
+  final_outcome: DECLINED
+  trail: ["process:PENDING_APPROVAL", "approve:declined"]
+  reason: price_variance
+  audits: [[post_payable, approval, declined]]

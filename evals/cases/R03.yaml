@@ -1,0 +1,11 @@
+id: R03
+title: Revert P-2 after the A04 credit memo was applied against it
+extends: A04
+steps: [upload, process, {approve: approve}, {revert: {audit: A-2}}]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "revert:REVERT_REFUSED:dependent_write"]
+  audits: [[apply_credit_memo, approval, applied]]
+  payables_changed: {P-2: {credits_cents: 7700}}
+  ledger_entries_added: 1
+  ledger_net: {"2000": 7700, "6100": -7700}

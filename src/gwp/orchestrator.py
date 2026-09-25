@@ -41,6 +41,7 @@ from .schema import (
     Role,
     RunOutcome,
     Tier,
+    VendorRequest,
     params_dict,
 )
 from .store import DynamoStore
@@ -295,6 +296,12 @@ class Orchestrator:
 
         # Step 12: execute the auto tier.
         results = [self.executor.apply(tenant_id, aid) for aid in audit_ids]
+        if VendorRequest.bank_details_change in extraction.vendor_requests:
+            # The written policy sends any bank change request to a person. The agent can't act on it, and the
+            # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
+            self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
+                                       "reason_code": "vendor_requested_bank_change", "status": "open",
+                                       "created_at": self.clock.now()})
         if all(r.status in ("applied", "already_applied") for r in results):
             return self._finish(tenant_id, run_id, RunOutcome.APPLIED, None, trace, t0, audit_ids, decision)
         errors = ",".join(r.error or r.status for r in results if r.status not in ("applied", "already_applied"))

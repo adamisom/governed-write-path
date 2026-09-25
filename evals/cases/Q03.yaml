@@ -1,0 +1,35 @@
+id: Q03
+title: Kestrel invoice for 4 filing cabinets, $840.00, with no PO number printed
+extends: D05
+document:
+  invoice_number: KOF-2233
+  invoice_date: "2026-08-17"
+  po_number: null
+runs:
+  - cooperative:
+      proposer:
+        - search: invoice without a purchase order number
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2233
+                invoice_date: "2026-08-17"
+                po_id: PO-7009
+                total_cents: 84000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6150", amount_cents: 84000}
+              rationale: No PO printed. PO-7009 is the open order for 4 filing cabinets, all received.
+              confidence: 0.85
+              evidence: [PO-7009, "POL-AP#purchase-orders"]
+retrieval_required: [PO-7009]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: KOF-2233, po_id: PO-7009, total_cents: 84000,
+       lines: [[item, "6150", 84000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6150": 84000, "2000": -84000}
+  receipts: {"PO-7009#1": 4}

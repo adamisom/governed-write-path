@@ -1,0 +1,64 @@
+id: C04
+title: Pine Street two-page invoice with 12 lines, table split across pages, $1,904.00
+document:
+  kind: invoice
+  layout: modern
+  vendor_name: Pine Street Paper Supply
+  vendor_tax_id: 84-2210937
+  remit_to_bank_last4: "4821"
+  invoice_number: INV-6004
+  invoice_date: "2026-08-06"
+  po_number: PO-7012
+  lines:
+    - {description: "Copy paper, letter (ream)", qty: 10, unit_price_cents: 3250}
+    - {description: "Copy paper, legal (ream)", qty: 5, unit_price_cents: 3600}
+    - {description: "Cardstock, white (case)", qty: 4, unit_price_cents: 2400}
+    - {description: "Toner cartridge, black", qty: 4, unit_price_cents: 3850}
+    - {description: "Toner cartridge, cyan", qty: 2, unit_price_cents: 4400}
+    - {description: "Toner cartridge, magenta", qty: 2, unit_price_cents: 4400}
+    - {description: "Toner cartridge, yellow", qty: 2, unit_price_cents: 4400}
+    - {description: "Envelopes, #10 (box)", qty: 10, unit_price_cents: 1850}
+    - {description: "Shipping labels (pack)", qty: 8, unit_price_cents: 2200}
+    - {description: "Photo paper, glossy (pack)", qty: 6, unit_price_cents: 2900}
+    - {description: "Kraft paper roll", qty: 3, unit_price_cents: 4100}
+    - {description: "Binding covers (box)", qty: 5, unit_price_cents: 4540}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6004
+                invoice_date: "2026-08-06"
+                po_id: PO-7012
+                total_cents: 190400
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 32500}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 18000}
+                  - {source_line: 3, po_line_no: 3, account: "6100", amount_cents: 9600}
+                  - {source_line: 4, po_line_no: 4, account: "6100", amount_cents: 15400}
+                  - {source_line: 5, po_line_no: 5, account: "6100", amount_cents: 8800}
+                  - {source_line: 6, po_line_no: 6, account: "6100", amount_cents: 8800}
+                  - {source_line: 7, po_line_no: 7, account: "6100", amount_cents: 8800}
+                  - {source_line: 8, po_line_no: 8, account: "6100", amount_cents: 18500}
+                  - {source_line: 9, po_line_no: 9, account: "6100", amount_cents: 17600}
+                  - {source_line: 10, po_line_no: 10, account: "6100", amount_cents: 17400}
+                  - {source_line: 11, po_line_no: 11, account: "6100", amount_cents: 12300}
+                  - {source_line: 12, po_line_no: 12, account: "6100", amount_cents: 22700}
+              rationale: All 12 lines match PO-7012 and are fully received.
+              confidence: 0.9
+              evidence: [PO-7012]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6004, po_id: PO-7012, total_cents: 190400,
+       lines: [[item, "6100", 32500], [item, "6100", 18000], [item, "6100", 9600], [item, "6100", 15400],
+               [item, "6100", 8800], [item, "6100", 8800], [item, "6100", 8800], [item, "6100", 18500],
+               [item, "6100", 17600], [item, "6100", 17400], [item, "6100", 12300], [item, "6100", 22700]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 190400, "2000": -190400}
+  receipts: {"PO-7012#1": 10, "PO-7012#2": 5, "PO-7012#3": 4, "PO-7012#4": 4, "PO-7012#5": 2, "PO-7012#6": 2,
+             "PO-7012#7": 2, "PO-7012#8": 10, "PO-7012#9": 8, "PO-7012#10": 6, "PO-7012#11": 3, "PO-7012#12": 5}

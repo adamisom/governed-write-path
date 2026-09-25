@@ -1,0 +1,29 @@
+id: A04
+title: Pine Street credit memo CM-17 for 2 toner, $77.00, citing INV-5521; the approver approves
+document:
+  kind: credit_memo
+  layout: classic
+  vendor_name: Pine Street Paper Supply
+  vendor_tax_id: 84-2210937
+  invoice_number: CM-17
+  invoice_date: "2026-08-12"
+  referenced_invoice_numbers: [INV-5521]
+  lines:
+    - {description: "Toner cartridge, black (returned)", qty: 2, unit_price_cents: 3850}
+steps: [upload, process, {approve: approve}]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: CM-17, payable_id: P-2, amount_cents: 7700}
+              rationale: The memo cites INV-5521, which is posted as P-2.
+              confidence: 0.9
+              evidence: [P-2]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied"]
+  audits: [[apply_credit_memo, approval, applied]]
+  payables_changed: {P-2: {credits_cents: 7700}}
+  ledger_entries_added: 1
+  ledger_net: {"2000": 7700, "6100": -7700}

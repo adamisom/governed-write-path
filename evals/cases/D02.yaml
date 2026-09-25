@@ -1,0 +1,48 @@
+id: D02
+title: A rescan of the C01 invoice (different bytes, same vendor, number and total) after C01 posted
+extends: C01
+documents:
+  rescan: {layout: modern}
+steps: [upload, process, {upload: rescan}, process]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6001
+                invoice_date: "2026-08-03"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001.
+              confidence: 0.95
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6001
+                invoice_date: "2026-08-03"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001. Code checks for duplicates.
+              confidence: 0.9
+expect:
+  final_outcome: ROUTED_TO_HUMAN
+  trail: ["process:APPLIED", "process:ROUTED_TO_HUMAN"]
+  reason: duplicate_invoice
+  audits: [[post_payable, auto, applied], [post_payable, human, routed]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6001, po_id: PO-7001, total_cents: 84250,
+       lines: [[item, "6100", 65000], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84250, "2000": -84250}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

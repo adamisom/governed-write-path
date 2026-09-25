@@ -1,0 +1,26 @@
+id: T01
+title: A T1 invoice naming Sable Dental Labs, a vendor of tenant T2
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Sable Dental Labs
+  vendor_tax_id: 84-9001234
+  remit_to_bank_last4: "6002"
+  invoice_number: SDL-95
+  invoice_date: "2026-08-25"
+  lines:
+    - {description: "Crown fabrication", qty: 1, unit_price_cents: 30000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: request_human_review
+              params: {reason_code: unknown_vendor}
+              rationale: The vendor is not in this company's vendor list.
+              confidence: 0.95
+retrieval_forbidden: [V-201, P-201, "POL-BD#lab-work"]
+expect:
+  final_outcome: ROUTED_TO_HUMAN
+  trail: ["process:ROUTED_TO_HUMAN"]
+  reason: unknown_vendor
+  human_task_reason: unknown_vendor

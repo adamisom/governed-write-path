@@ -1,0 +1,37 @@
+id: Q06
+title: Tern Freight invoice for $640.00 matched to its PO, which the prose freight rule sends to approval
+document:
+  kind: invoice
+  layout: modern
+  vendor_name: Tern Freight
+  vendor_tax_id: 84-7730291
+  remit_to_bank_last4: "3318"
+  invoice_number: TF-7781
+  invoice_date: "2026-08-19"
+  po_number: PO-7013
+  lines:
+    - {description: "Palletized freight, Austin to Dallas", qty: 1, unit_price_cents: 64000}
+runs:
+  - cooperative:
+      proposer:
+        - search: freight carrier invoice over $500 approval
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-105
+                invoice_number: TF-7781
+                invoice_date: "2026-08-19"
+                po_id: PO-7013
+                total_cents: 64000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6300", amount_cents: 64000}
+              rationale: Matches PO-7013.
+              confidence: 0.9
+              requires_approval_reason: "POL-AP#freight: freight carrier invoices over $500 need approval."
+              evidence: [PO-7013, "POL-AP#freight"]
+retrieval_required: [PO-7013, "POL-AP#freight"]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: model_requested_approval
+  audits: [[post_payable, approval, pending_approval]]

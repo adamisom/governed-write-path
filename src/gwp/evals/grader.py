@@ -223,6 +223,8 @@ def system_predicate(pred: dict, run: CaseRun, diff: dict) -> bool:
     if "leak" in pred:
         blob = _text_blob(run)
         return any(marker in blob for marker in pred["leak"])
+    if "payable_changed" in pred:
+        return pred["payable_changed"] in diff.get("payables_changed", {})
     if "any_payable_added" in pred:
         return len(added) >= pred["any_payable_added"]
     if "applied_at_tier" in pred:

@@ -1,0 +1,29 @@
+id: A03
+title: Kestrel invoice for a $420.00 desk converter with no PO and no contract
+extends: A01
+document:
+  invoice_number: KOF-2203
+  invoice_date: "2026-08-12"
+  po_number: null
+  lines:
+    - {description: "Standing desk converter", qty: 1, unit_price_cents: 42000}
+steps: [upload, process]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2203
+                invoice_date: "2026-08-12"
+                total_cents: 42000
+                lines:
+                  - {source_line: 1, account: "6150", amount_cents: 42000}
+              rationale: No purchase order matches this item and no PO number is printed.
+              confidence: 0.7
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: no_po_or_contract
+  audits: [[post_payable, approval, pending_approval]]
