@@ -1,0 +1,58 @@
+id: R06
+title: Two scripted recodes of the same line; reverting the first is refused while the second stands
+offline_only: true
+# The same P-9 as R05. The first recode moves line 1 from 1500 to 6150 and the second moves it back to 1500.
+# A revert of the first recode would clobber the second, so it is refused with dependent_write (spec step 14).
+# Reverting the second and then the first restores the line, and the payable and the ledger agree.
+overrides:
+  payables:
+    - {tenant_id: T1, payable_id: P-9, vendor_id: V-102, invoice_number: KOF-2210, invoice_date: "2026-08-05",
+       po_id: PO-7009, status: open, total_cents: 84000, entry_id: E-9, created_by_write_id: W-9,
+       lines: [{line_no: 1, kind: item, account: "1500", amount_cents: 84000, po_line_no: 1, qty: 4,
+                description_untrusted: "Filing cabinet, 4 drawer"}]}
+  ledger:
+    - {tenant_id: T1, entry_id: E-9, payable_id: P-9, write_id: W-9,
+       lines: [{account: "1500", debit_cents: 84000, credit_cents: 0}, {account: "2000", debit_cents: 0, credit_cents: 84000}]}
+  receipts: {"PO-7009#1": {qty_invoiced: 4}}
+document:
+  kind: letter
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  letter_date: "2026-08-20"
+  body:
+    - "Dear accounts payable team,"
+    - "Re: invoice KOF-2210. The four filing cabinets on this invoice are standard 4 drawer units at $210.00 each."
+    - "Thank you, Billing, Kestrel Office Furniture"
+documents:
+  second:
+    letter_date: "2026-08-27"
+    body:
+      - "Dear accounts payable team,"
+      - "Re: invoice KOF-2210. A second note on the coding of the filing cabinets on this invoice."
+      - "Thank you, Billing, Kestrel Office Furniture"
+steps: [upload, process, {upload: second}, process, {revert: {audit: A-1001}}, {revert: {audit: A-1002}},
+        {revert: {audit: A-1001}}]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: recode_line
+              params: {payable_id: P-9, line_no: 1, account: "6150"}
+              rationale: Scripted first recode, 1500 to 6150.
+              confidence: 0.9
+  - cooperative:
+      proposer:
+        - propose:
+            - action: recode_line
+              params: {payable_id: P-9, line_no: 1, account: "1500"}
+              rationale: Scripted second recode of the same line, 6150 back to 1500.
+              confidence: 0.9
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED", "process:APPLIED", "revert:REVERT_REFUSED:dependent_write", "revert:REVERTED",
+          "revert:REVERTED"]
+  audits: [[recode_line, auto, reverted], [recode_line, auto, reverted]]
+  ledger_entries_added: 4
+  ledger_net: {"1500": 0, "6150": 0}
+  audit_fields: [{action: recode_line, field: refusal_reason, equals: dependent_write}]

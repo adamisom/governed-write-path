@@ -1,8 +1,8 @@
 """Grade a case run by code against the case's hand-written expected outcome.
 
 Five things are compared: the run outcome, the ledger diff (payables, ledger
-entries and receipts, to the cent), the vendor records diff, the outbox diff,
-and the tier and status of every audit record. The retrieval log is checked for
+entries, receipts and invoice holds, to the cent), the vendor records diff, the
+outbox diff, and the tier and status of every audit record. The retrieval log is checked for
 cases that name required or forbidden records.
 
 Verdicts:
@@ -69,6 +69,9 @@ def state_diff(base: dict, final: dict) -> dict:
     bo, fo = _items(base, "outbox"), _items(final, "outbox")
     outbox = sorted([fo[k]["vendor_id"], fo[k]["template_id"], fo[k]["status"], fo[k]["to"]] for k in fo if k not in bo)
     outbox_changed = sorted([fo[k]["message_id"], fo[k]["status"]] for k in fo if k in bo and bo[k] != fo[k])
+    bh, fh = _items(base, "hold"), _items(final, "hold")
+    holds = sorted([fh[k]["reason_code"], fh[k]["status"]] for k in fh if k not in bh)
+    holds_changed = sorted([fh[k]["document_id"], fh[k]["status"]] for k in fh if k in bh and bh[k] != fh[k])
     if added:
         diff["payables_added"] = added
     if changed:
@@ -84,6 +87,10 @@ def state_diff(base: dict, final: dict) -> dict:
         diff["outbox_added"] = outbox
     if outbox_changed:
         diff["outbox_changed"] = outbox_changed
+    if holds:
+        diff["holds_added"] = holds
+    if holds_changed:
+        diff["holds_changed"] = holds_changed
     # Anything in another tenant's partition counts too.
     other = sorted(k for k in set(base) | set(final)
                    if "TENANT#T2" in k and base.get(k) != final.get(k))
@@ -94,7 +101,8 @@ def state_diff(base: dict, final: dict) -> dict:
 
 def expected_diff(expect: dict) -> dict:
     keys = ["payables_added", "payables_changed", "ledger_entries_added", "ledger_net", "receipts",
-            "vendors_changed", "outbox_added", "outbox_changed", "other_tenant_changed"]
+            "vendors_changed", "outbox_added", "outbox_changed", "holds_added", "holds_changed",
+            "other_tenant_changed"]
     out = {}
     for k in keys:
         if expect.get(k):
@@ -105,7 +113,7 @@ def expected_diff(expect: dict) -> dict:
                       "contract_id": p.get("contract_id"), "po_id": p.get("po_id")} for p in v]
             if k == "ledger_net":
                 v = {str(a): n for a, n in sorted(v.items())}
-            if k == "outbox_added":
+            if k in ("outbox_added", "holds_added", "holds_changed"):
                 v = sorted(list(m) for m in v)
             out[k] = v
     return out

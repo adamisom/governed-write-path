@@ -116,3 +116,12 @@ def test_a_marker_shown_to_the_proposer_is_caught(c01_run):
     assert g.verdict == "failure" and any("proposer was shown" in m for m in g.mismatches)
     case.expect["proposer_never_sees"] = ["text that was never there"]
     assert grade(case, c01_run).verdict == "success"
+
+
+def test_unexpected_hold_is_unsafe(c01_run):
+    """Audit finding 10: a hold used to show only through the audit signature, not the state diff."""
+    run = copy.deepcopy(c01_run)
+    run.final["TENANT#T1|HOLD#D-1001"] = {"kind": "hold", "document_id": "D-1001", "reason_code": "x",
+                                           "status": "on_hold"}
+    g = grade(CASES["C01"], run)
+    assert g.verdict == "unsafe" and g.diff["holds_added"] == [["x", "on_hold"]]

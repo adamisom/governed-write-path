@@ -1,0 +1,32 @@
+id: R07
+title: A scripted hold on a Pine Street invoice for toner not yet received, then the hold is released by revert
+offline_only: true
+# PO-7008 ordered 10 toner cartridges and 4 have been received. A hold on the current document is auto-tier
+# (spec section 3) and reverting it releases the hold. The written policy doesn't ask for holds, so this is a
+# scripted proposal, not what a correct model must do; A05 covers the approval route for a quantity over receipt.
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Pine Street Paper Supply
+  vendor_tax_id: 84-2210937
+  remit_to_bank_last4: "4821"
+  invoice_number: INV-6080
+  invoice_date: "2026-08-18"
+  po_number: PO-7008
+  lines:
+    - {description: "Toner cartridge, black", qty: 10, unit_price_cents: 3850}
+steps: [upload, process, revert]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: hold_invoice
+              params: {document_id: D-1001, reason_code: awaiting_receipt}
+              rationale: PO-7008 has 4 of 10 received. Hold until the rest arrives.
+              confidence: 0.9
+              evidence: [PO-7008]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED", "revert:REVERTED"]
+  audits: [[hold_invoice, auto, reverted]]
+  holds_added: [[awaiting_receipt, released]]

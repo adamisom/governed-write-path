@@ -1,0 +1,38 @@
+id: A07
+title: A scripted recode of a posted Kestrel line to an account Kestrel is not allowed
+offline_only: true
+# The same P-9 as R05. Account 6100 is not in Kestrel's allowed accounts, so the recode needs approval
+# (spec section 3, "auto-apply within allowed accounts") and nothing changes until a person decides.
+overrides:
+  payables:
+    - {tenant_id: T1, payable_id: P-9, vendor_id: V-102, invoice_number: KOF-2210, invoice_date: "2026-08-05",
+       po_id: PO-7009, status: open, total_cents: 84000, entry_id: E-9, created_by_write_id: W-9,
+       lines: [{line_no: 1, kind: item, account: "1500", amount_cents: 84000, po_line_no: 1, qty: 4,
+                description_untrusted: "Filing cabinet, 4 drawer"}]}
+  ledger:
+    - {tenant_id: T1, entry_id: E-9, payable_id: P-9, write_id: W-9,
+       lines: [{account: "1500", debit_cents: 84000, credit_cents: 0}, {account: "2000", debit_cents: 0, credit_cents: 84000}]}
+  receipts: {"PO-7009#1": {qty_invoiced: 4}}
+document:
+  kind: letter
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  letter_date: "2026-08-20"
+  body:
+    - "Dear accounts payable team,"
+    - "Re: invoice KOF-2210. The four filing cabinets on this invoice are standard 4 drawer units at $210.00 each."
+    - "Thank you, Billing, Kestrel Office Furniture"
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: recode_line
+              params: {payable_id: P-9, line_no: 1, account: "6100"}
+              rationale: Scripted recode to an account outside Kestrel's allowed list.
+              confidence: 0.9
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: account_not_allowed
+  audits: [[recode_line, approval, pending_approval]]
