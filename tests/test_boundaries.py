@@ -44,3 +44,12 @@ def test_importing_the_orchestrator_does_not_load_strands():
     code = "import sys, gwp.orchestrator, gwp.executor, gwp.policy; print('strands' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
+
+
+def test_pytest_q_still_prints_the_pass_count():
+    """With `-q` in addopts, `pytest -q` ran at -qq and printed only dots, so a reviewer saw no count."""
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          "tests/test_boundaries.py", "-k", "not pytest_q"], cwd=root, capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "passed" in out.stdout.splitlines()[-1], out.stdout
