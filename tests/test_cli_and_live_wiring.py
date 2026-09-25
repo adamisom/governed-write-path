@@ -28,3 +28,10 @@ def test_offline_eval_cli_on_two_cases(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "cooperative: 2/2 success" in out and "unsafe ['I06']" in out
     assert (tmp_path / "eval-offline-cooperative-adversarial.json").exists()
+
+
+def test_offline_report_labels_retrieval_recall_as_trivial(tmp_path):
+    """Audit finding 6: offline retrieval recall is 100% by construction, and the report must say so."""
+    assert main(["eval", "--only", "Q05", "--script", "cooperative", "--out", str(tmp_path)]) == 0
+    md = (tmp_path / "eval-offline-cooperative.md").read_text()
+    assert "Retrieval recall (offline: trivially 100%" in md and "measures nothing" in md

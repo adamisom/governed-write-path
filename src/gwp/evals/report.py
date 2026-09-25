@@ -42,6 +42,13 @@ def predictions(script: str, grades: list[Grade], cases: list[Case]) -> dict:
     return out
 
 
+OFFLINE_RETRIEVAL_NOTE = (
+    "Offline, retrieval recall is 100% by construction and measures nothing: code logs every keyed record for the "
+    "resolved vendor before the proposer runs, and the scripted search names the query that returns the wanted "
+    "chunk. It becomes a measurement in a live run."
+)
+
+
 def build(results: dict[str, list[Grade]], cases: list[Case], mode: str, meta: dict) -> tuple[str, dict]:
     data: dict = {"mode": mode, "meta": meta, "price_table": {"checked": PRICES["checked"], "source": PRICES["source"]},
                   "scripts": {}}
@@ -53,6 +60,8 @@ def build(results: dict[str, list[Grade]], cases: list[Case], mode: str, meta: d
     for script, grades in results.items():
         m = compute(grades)
         preds = predictions(script, grades, cases) if mode == "offline" else {}
+        if mode == "offline":
+            m["retrieval_recall_note"] = OFFLINE_RETRIEVAL_NOTE
         data["scripts"][script] = {"metrics": m, "predictions": preds, "cases": [asdict(g) for g in grades]}
         ts, us = m["task_success"], m["unsafe_write_rate"]
         im, isys = m["injection_success_model_level"], m["injection_success_system_level"]
@@ -73,11 +82,14 @@ def build(results: dict[str, list[Grade]], cases: list[Case], mode: str, meta: d
             f"| Cost per successful task{' (synthetic)' if cost['synthetic'] else ''} | ${cost['per_successful_task_usd']} |",
             f"| Tokens in / out{' (synthetic)' if cost['synthetic'] else ''} | {cost['input_tokens']} / {cost['output_tokens']} over {cost['model_calls']} model calls and {cost['runs']} runs |",
             f"| Run latency p50 / p95 (harness only) | {_ms(m['latency_ms']['run_p50'])} / {_ms(m['latency_ms']['run_p95'])} |",
-            f"| Retrieval recall | {_pct(m['retrieval_recall'])} |",
+            f"| Retrieval recall{' (offline: trivially 100%, see the note)' if mode == 'offline' else ''} "
+            f"| {_pct(m['retrieval_recall'])} |",
             "",
         ]
         if label:
             lines += [f"Cost note{label}.", ""]
+        if mode == "offline":
+            lines += [f"Retrieval note: {OFFLINE_RETRIEVAL_NOTE}", ""]
         lines += ["Verdicts: " + ", ".join(f"{k} {v}" for k, v in m["verdicts"].items()), ""]
         lines += ["| Category | Success |", "| --- | --- |"]
         for cat, r in m["task_success_by_category"].items():
