@@ -2,7 +2,7 @@
 
     gwp eval --mode offline                      both scripted models, no network, no cost
     gwp eval --mode offline --script adversarial
-    gwp eval --mode live --provider anthropic --confirm-spend --max-usd 5
+    gwp eval --mode live --provider anthropic --confirm-spend --max-usd 7
     gwp generate-docs
 """
 
@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from .agents.strands_agents import DEFAULT_MODELS
+from .cost import RESEARCH_USD_PER_RUN
 from .evals.cases import REPO_EVALS, generate_documents, load_cases
 from .evals.grader import grade
 from .evals.report import write
@@ -30,6 +31,22 @@ def _live_credentials_present(provider: str) -> bool:
     return boto3.Session().get_credentials() is not None
 
 
+def estimate_live_cost(cases: list, repeats: int) -> tuple[int, int, float]:
+    """(live cases, model runs, dollars) for a live pass, from the research's per-run estimate.
+
+    A run is one `process` step, i.e. one reader call and one proposer call, before retries. Setup steps count,
+    since they call the models too. Offline-only cases are skipped in live mode.
+    """
+    live = [c for c in cases if not c.offline_only]
+    runs = 0
+    for c in live:
+        for step in c.setup + c.steps:
+            name = step if isinstance(step, str) else next(iter(step))
+            runs += name == "process"
+    runs *= repeats
+    return len(live), runs, round(runs * RESEARCH_USD_PER_RUN, 2)
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     logging.getLogger("strands").setLevel(logging.CRITICAL)  # scripted faults log noisy tracebacks
     cases = load_cases(Path(args.cases) if args.cases else None)
@@ -39,9 +56,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
     out = Path(args.out)
     live = None
     if args.mode == "live":
-        if not args.confirm_spend:
-            print("Live mode calls a paid model API. Pass --confirm-spend and --max-usd to run it.", file=sys.stderr)
+        n_cases, n_runs, usd = estimate_live_cost(cases, args.repeats)
+        estimate = (f"Estimated spend: {n_cases} live cases, {n_runs} model runs at {args.repeats} repeats, about "
+                    f"${usd:.2f} at ${RESEARCH_USD_PER_RUN} a run (the research estimate, before retries).")
+        if not args.confirm_spend or args.max_usd is None:
+            print("Live mode calls a paid model API. Pass --confirm-spend and --max-usd to run it. " + estimate,
+                  file=sys.stderr)
             return 2
+        if args.max_usd < usd:
+            print(f"Warning: --max-usd {args.max_usd} is below the estimate, so the run will likely stop before "
+                  f"every case has run {args.repeats} times. {estimate}", file=sys.stderr)
         if not _live_credentials_present(args.provider):
             print(f"No credentials for {args.provider} on this machine. Nothing was run.", file=sys.stderr)
             return 2
@@ -111,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--proposer-model", default=None)
     e.add_argument("--region", default=None)
     e.add_argument("--repeats", type=int, default=3, help="live mode: runs per case")
-    e.add_argument("--max-usd", type=float, default=0.0, help="live mode: stop when spend reaches this")
+    e.add_argument("--max-usd", type=float, default=None,
+                   help="live mode, required: stop starting cases once spend reaches this. A full pass at 3 repeats "
+                        "is about $5 by the research estimate; 7 leaves room for retries")
     e.add_argument("--confirm-spend", action="store_true")
     e.add_argument("--disable-search", action="store_true",
                    help="live mode: remove the proposer's search tool (the H2 ablation)")

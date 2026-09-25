@@ -35,3 +35,13 @@ def test_offline_report_labels_retrieval_recall_as_trivial(tmp_path):
     assert main(["eval", "--only", "Q05", "--script", "cooperative", "--out", str(tmp_path)]) == 0
     md = (tmp_path / "eval-offline-cooperative.md").read_text()
     assert "Retrieval recall (offline: trivially 100%" in md and "measures nothing" in md
+
+
+def test_live_cost_estimate_comes_from_the_research_figure_not_synthetic_tokens(capsys):
+    """Audit finding 8: the doc's $2 to $3 came from synthetic tokens. 44 live cases, 46 runs a repeat, $0.036 each."""
+    from gwp.cli import estimate_live_cost
+    from gwp.evals.cases import load_cases
+
+    assert estimate_live_cost(load_cases(), 3) == (44, 138, 4.97)
+    assert main(["eval", "--mode", "live", "--confirm-spend"]) == 2  # no --max-usd: refuse, and show the estimate
+    assert "about $4.97" in capsys.readouterr().err

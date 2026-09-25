@@ -14,6 +14,12 @@ def load_prices() -> dict:
 
 PRICES = load_prices()
 
+# The research note's estimate for one live run with the default models (Haiku 4.5 reads a 5,000-token document
+# and writes 500 tokens; Sonnet 5 proposes in two calls of 4,000 input and 600 output tokens; no caching):
+# 5,000 x $1/M + 500 x $5/M + 8,000 x $2/M + 1,200 x $10/M = about $0.036. It is an estimate, not a measurement,
+# and it leaves out retries. The offline synthetic token counts are not used for this: they measure nothing.
+RESEARCH_USD_PER_RUN = 0.036
+
 
 def canonical_model(model_id: str) -> str:
     """Map a Bedrock id such as global.anthropic.claude-haiku-4-5-20251001-v1:0 to claude-haiku-4-5."""
