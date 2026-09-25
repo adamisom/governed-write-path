@@ -25,6 +25,19 @@ from .store import AUDIT, RECORDS, DynamoStore, TransactionConflict, audit_trans
 from .world import normalize_ref
 
 
+class PlanError(Exception):
+    """A write's plan no longer fits the records, e.g. its payable is gone. The write fails; nothing is built.
+
+    A named exception, not an assert, so the check still runs under `python -O`.
+    """
+
+
+def _need(value, what: str):
+    if value is None:
+        raise PlanError(f"{what} not found")
+    return value
+
+
 class SimulatedCrash(BaseException):
     """Raised by the fault hook after a commit, before the executor acknowledges it.
 
@@ -106,7 +119,7 @@ class Executor:
         write_id = self.ids.new("W")
         try:
             ops, before, after, apply_record = builder(tenant_id, audit, write_id)
-        except (KeyError, StopIteration, AssertionError, TypeError) as exc:
+        except (PlanError, KeyError, StopIteration, IndexError, TypeError) as exc:
             # The proposal no longer fits the records (e.g. an approved line that names no PO line).
             # Fail this write and record why; never half-build a transaction.
             error = f"plan_failed:{type(exc).__name__}:{exc}"[:300]
@@ -204,8 +217,7 @@ class Executor:
         s = self.store
         prm = audit["params"]
         pk = tenant_pk(tenant_id)
-        payable = s.get_payable(tenant_id, prm["payable_id"])
-        assert payable is not None
+        payable = _need(s.get_payable(tenant_id, prm["payable_id"]), "payable")
         policy = (s.get_tenant(tenant_id) or {})["policy"]
         entry_id = self.ids.new("E")
         expense_account = next(ln["account"] for ln in payable["lines"] if ln.get("kind", "item") == "item")
@@ -235,8 +247,7 @@ class Executor:
         s = self.store
         prm = audit["params"]
         pk = tenant_pk(tenant_id)
-        payable = s.get_payable(tenant_id, prm["payable_id"])
-        assert payable is not None
+        payable = _need(s.get_payable(tenant_id, prm["payable_id"]), "payable")
         idx = next(i for i, ln in enumerate(payable["lines"]) if ln["line_no"] == prm["line_no"])
         line = payable["lines"][idx]
         entry_id = self.ids.new("E")
@@ -266,8 +277,7 @@ class Executor:
     def _plan_vendor_query(self, tenant_id: str, audit: dict, write_id: str):
         s = self.store
         prm = audit["params"]
-        vendor = s.get_vendor(tenant_id, prm["vendor_id"])
-        assert vendor is not None
+        vendor = _need(s.get_vendor(tenant_id, prm["vendor_id"]), "vendor")
         message_id = self.ids.new("M")
         msg = {"tenant_id": tenant_id, "message_id": message_id, "vendor_id": prm["vendor_id"],
                "to": vendor["contact_email"],  # always the contact on file, never a model-chosen address
@@ -305,73 +315,81 @@ class Executor:
         ops: list[dict] = []
         action = audit["action"]
 
-        if action == "post_payable":
-            payable = s.get_payable(tenant_id, rec["payable_id"])
-            if payable is None or payable["status"] != "open":
-                return self._refuse(tenant_id, audit_id, requested_by, "not_open")
-            if payable.get("dependents"):
-                return self._refuse(tenant_id, audit_id, requested_by, "dependent_write")
-            ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
-            ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
-                                 "SET #st = :rev, version = version + :one, reversed_by_write_id = :w",
-                                 "#st = :open AND version = :v AND attribute_not_exists(dependents)",
-                                 names={"#st": "status"},
-                                 values={":rev": "reversed", ":open": "open", ":one": 1, ":v": payable["version"],
-                                         ":w": rev_write}))
-            for u in rec.get("receipt_updates", []):
-                r = next(x for x in s.get_receipts(tenant_id, u["po_id"]) if x["line_no"] == u["line_no"])
-                ops.append(op_update(s.t(RECORDS), pk, f"RECEIPT#{u['po_id']}#{u['line_no']:02d}",
-                                     "SET qty_invoiced = qty_invoiced - :q, version = version + :one",
-                                     "version = :v", values={":q": u["qty"], ":one": 1, ":v": r["version"]}))
-        elif action == "apply_credit_memo":
-            payable = s.get_payable(tenant_id, rec["payable_id"])
-            assert payable is not None
-            ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
-            ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
-                                 "SET credits_cents = credits_cents - :a, version = version + :one DELETE dependents :w",
-                                 "version = :v", values={":a": rec["amount_cents"], ":one": 1, ":w": {write_id},
-                                                         ":v": payable["version"]}))
-            ops.append(op_update(s.t(RECORDS), pk, rec["credit_sk"], "SET #st = :rev", "#st = :applied",
-                                 names={"#st": "status"}, values={":rev": "reversed", ":applied": "applied"}))
-        elif action == "recode_line":
-            payable = s.get_payable(tenant_id, rec["payable_id"])
-            idx = rec["line_index"]
-            if payable is None or payable["status"] != "open":
-                return self._refuse(tenant_id, audit_id, requested_by, "not_open")
-            line = payable["lines"][idx]
-            if line.get("last_recode_write_id") != write_id or line["account"] != rec["new_account"]:
-                # A later recode of the same line is applied. Revert that one first.
-                return self._refuse(tenant_id, audit_id, requested_by, "dependent_write")
-            ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
-            prev = rec.get("prev_recode_write_id")
-            values = {":old": rec["old_account"], ":one": 1, ":w": {write_id}, ":v": payable["version"],
-                      ":me": write_id, ":new": rec["new_account"], ":open": "open"}
-            if prev:
-                values[":prev"] = prev
-                marker = f"SET #ln[{idx}].last_recode_write_id = :prev, "
-                tail = ""
+        try:
+            if action == "post_payable":
+                payable = s.get_payable(tenant_id, rec["payable_id"])
+                if payable is None or payable["status"] != "open":
+                    return self._refuse(tenant_id, audit_id, requested_by, "not_open")
+                if payable.get("dependents"):
+                    return self._refuse(tenant_id, audit_id, requested_by, "dependent_write")
+                ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
+                ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
+                                     "SET #st = :rev, version = version + :one, reversed_by_write_id = :w",
+                                     "#st = :open AND version = :v AND attribute_not_exists(dependents)",
+                                     names={"#st": "status"},
+                                     values={":rev": "reversed", ":open": "open", ":one": 1, ":v": payable["version"],
+                                             ":w": rev_write}))
+                for u in rec.get("receipt_updates", []):
+                    r = next(x for x in s.get_receipts(tenant_id, u["po_id"]) if x["line_no"] == u["line_no"])
+                    ops.append(op_update(s.t(RECORDS), pk, f"RECEIPT#{u['po_id']}#{u['line_no']:02d}",
+                                         "SET qty_invoiced = qty_invoiced - :q, version = version + :one",
+                                         "version = :v", values={":q": u["qty"], ":one": 1, ":v": r["version"]}))
+            elif action == "apply_credit_memo":
+                payable = s.get_payable(tenant_id, rec["payable_id"])
+                if payable is None:
+                    return self._refuse(tenant_id, audit_id, requested_by, "not_open")
+                ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
+                ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
+                                     "SET credits_cents = credits_cents - :a, version = version + :one DELETE dependents :w",
+                                     "version = :v", values={":a": rec["amount_cents"], ":one": 1, ":w": {write_id},
+                                                             ":v": payable["version"]}))
+                ops.append(op_update(s.t(RECORDS), pk, rec["credit_sk"], "SET #st = :rev", "#st = :applied",
+                                     names={"#st": "status"}, values={":rev": "reversed", ":applied": "applied"}))
+            elif action == "recode_line":
+                payable = s.get_payable(tenant_id, rec["payable_id"])
+                idx = rec["line_index"]
+                if payable is None or payable["status"] != "open":
+                    return self._refuse(tenant_id, audit_id, requested_by, "not_open")
+                line = payable["lines"][idx]
+                if line.get("last_recode_write_id") != write_id or line["account"] != rec["new_account"]:
+                    # A later recode of the same line is applied. Revert that one first.
+                    return self._refuse(tenant_id, audit_id, requested_by, "dependent_write")
+                ops += self._reversing_entry(tenant_id, rec["entry_id"], rec["payable_id"], rev_write)
+                prev = rec.get("prev_recode_write_id")
+                values = {":old": rec["old_account"], ":one": 1, ":w": {write_id}, ":v": payable["version"],
+                          ":me": write_id, ":new": rec["new_account"], ":open": "open"}
+                if prev:
+                    values[":prev"] = prev
+                    marker = f"SET #ln[{idx}].last_recode_write_id = :prev, "
+                    tail = ""
+                else:
+                    marker = "SET "
+                    tail = f" REMOVE #ln[{idx}].last_recode_write_id"
+                ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
+                                     marker + f"#ln[{idx}].account = :old, version = version + :one" + tail
+                                     + " DELETE dependents :w",
+                                     f"#st = :open AND version = :v AND #ln[{idx}].last_recode_write_id = :me "
+                                     f"AND #ln[{idx}].account = :new",
+                                     names={"#ln": "lines", "#st": "status"}, values=values))
+            elif action == "send_vendor_query":
+                msg = s.get_outbox(tenant_id, rec["message_id"])
+                if msg is None or msg["status"] != "queued":
+                    # A sent message can't be unsent. Refuse, and never send a "please ignore" follow-up,
+                    # since a revert must not create a side effect the original write didn't have.
+                    return self._refuse(tenant_id, audit_id, requested_by, "not_revertible")
+                ops.append(op_update(s.t(RECORDS), pk, f"OUTBOX#{rec['message_id']}", "SET #st = :c", "#st = :q",
+                                     names={"#st": "status"}, values={":c": "cancelled", ":q": "queued"}))
+            elif action == "hold_invoice":
+                ops.append(op_update(s.t(RECORDS), pk, rec["hold_sk"], "SET #st = :r", "#st = :h",
+                                     names={"#st": "status"}, values={":r": "released", ":h": "on_hold"}))
             else:
-                marker = "SET "
-                tail = f" REMOVE #ln[{idx}].last_recode_write_id"
-            ops.append(op_update(s.t(RECORDS), pk, f"PAYABLE#{rec['payable_id']}",
-                                 marker + f"#ln[{idx}].account = :old, version = version + :one" + tail
-                                 + " DELETE dependents :w",
-                                 f"#st = :open AND version = :v AND #ln[{idx}].last_recode_write_id = :me "
-                                 f"AND #ln[{idx}].account = :new",
-                                 names={"#ln": "lines", "#st": "status"}, values=values))
-        elif action == "send_vendor_query":
-            msg = s.get_outbox(tenant_id, rec["message_id"])
-            if msg is None or msg["status"] != "queued":
-                # A sent message can't be unsent. Refuse, and never send a "please ignore" follow-up,
-                # since a revert must not create a side effect the original write didn't have.
                 return self._refuse(tenant_id, audit_id, requested_by, "not_revertible")
-            ops.append(op_update(s.t(RECORDS), pk, f"OUTBOX#{rec['message_id']}", "SET #st = :c", "#st = :q",
-                                 names={"#st": "status"}, values={":c": "cancelled", ":q": "queued"}))
-        elif action == "hold_invoice":
-            ops.append(op_update(s.t(RECORDS), pk, rec["hold_sk"], "SET #st = :r", "#st = :h",
-                                 names={"#st": "status"}, values={":r": "released", ":h": "on_hold"}))
-        else:
-            return self._refuse(tenant_id, audit_id, requested_by, "not_revertible")
+
+        except (PlanError, KeyError, StopIteration, IndexError) as exc:
+            # The records no longer fit the compensating write. Refuse and record it; never half-build.
+            self._refuse(tenant_id, audit_id, requested_by, "plan_failed")
+            return ExecResult("refused", error=f"{type(exc).__name__}: {exc}"[:300],
+                              refusal_reason="plan_failed")
 
         rkey = revert_key(write_id)
         at = self.clock.now()
@@ -393,8 +411,7 @@ class Executor:
 
     def _reversing_entry(self, tenant_id: str, entry_id: str, payable_id: str, rev_write: str) -> list[dict]:
         s = self.store
-        original = s.get_key(tenant_id, f"ENTRY#{entry_id}")
-        assert original is not None
+        original = _need(s.get_key(tenant_id, f"ENTRY#{entry_id}"), f"ledger entry {entry_id}")
         rev_id = self.ids.new("E")
         entry = {"tenant_id": tenant_id, "entry_id": rev_id, "payable_id": payable_id, "write_id": rev_write,
                  "reverses_entry_id": entry_id, "lines": _swap(original["lines"])}

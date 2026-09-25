@@ -600,3 +600,18 @@ def test_none_values_survive_a_round_trip_through_the_store(store):
     assert "effective_to" in contract["price_schedule"][0] and contract["price_schedule"][0]["effective_to"] is None
     store.seed([{"pk": "TENANT#T1", "sk": "X#1", "kind": "x", "nested": {"a": None, "b": 1}}])
     assert store._get("records", "TENANT#T1", "X#1")["nested"] == {"a": None, "b": 1}
+
+
+def test_a_plan_that_no_longer_fits_fails_with_a_named_error_not_an_assert(store):
+    """Audit finding 16: the plan builders used asserts, which vanish under python -O."""
+    audit = _hand_built_audit(store, "A-P1", "auto", "proposed")
+    store.put_audit({**audit, "audit_id": "A-P2", "proposal_id": "R-HAND:P2", "action": "apply_credit_memo",
+                     "params": {"credit_number": "CM-9", "payable_id": "P-404", "amount_cents": 100}})
+    res = Executor(store, FakeClock(), Ids()).apply("T1", "A-P2")
+    assert res.status == "failed" and res.error.startswith("plan_failed:PlanError")
+    # A revert whose original ledger entry is missing is refused and recorded, not raised.
+    store.put_audit({**audit, "audit_id": "A-P3", "proposal_id": "R-HAND:P3", "status": "applied",
+                     "write_ids": ["W-9"], "apply_record": {"payable_id": "P-2", "entry_id": "E-404"}})
+    out = Executor(store, FakeClock(), Ids()).revert("T1", "A-P3", "user:ap")
+    assert out.status == "refused" and out.refusal_reason == "plan_failed"
+    assert store.get_payable("T1", "P-2")["status"] == "open"
