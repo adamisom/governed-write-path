@@ -49,7 +49,8 @@ def _to_dynamo(value: Any) -> Any:
     if isinstance(value, float):
         return Decimal(str(value))
     if isinstance(value, dict):
-        return {k: _to_dynamo(v) for k, v in value.items() if v is not None}
+        # None is stored as DynamoDB NULL, not dropped, so a reader always finds the key it wrote.
+        return {k: _to_dynamo(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_to_dynamo(v) for v in value]
     if isinstance(value, (set, frozenset)):

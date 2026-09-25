@@ -592,3 +592,11 @@ def test_process_on_a_run_another_worker_holds_says_in_progress(store):
     up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
     store.update_run("T1", up.run_id, {"state": "text_extracted"})
     assert orch.process("T1", up.run_id).outcome == "IN_PROGRESS"
+
+
+def test_none_values_survive_a_round_trip_through_the_store(store):
+    """Audit finding 15: the store used to drop None inside dicts, which caused the first C02 bug."""
+    contract = store.get_contract("T1", "C-103")
+    assert "effective_to" in contract["price_schedule"][0] and contract["price_schedule"][0]["effective_to"] is None
+    store.seed([{"pk": "TENANT#T1", "sk": "X#1", "kind": "x", "nested": {"a": None, "b": 1}}])
+    assert store._get("records", "TENANT#T1", "X#1")["nested"] == {"a": None, "b": 1}
