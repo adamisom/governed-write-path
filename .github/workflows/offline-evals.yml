@@ -1,0 +1,36 @@
+# The offline tier: unit tests, then the full eval with both scripted models. No network beyond
+# package installs, no credentials, no cost. The live tier is a manual run on a laptop for now.
+name: offline-evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras --locked
+      - name: Unit tests
+        run: uv run pytest -m "not eval"
+      - name: Eval cases as tests
+        run: uv run pytest -m eval
+      - name: Offline eval report (fails if a cooperative case fails or an unpredicted case is unsafe)
+        run: uv run gwp eval --mode offline --out eval-out --fail-on-regression
+      - name: Publish the report to the job summary
+        if: always()
+        run: cat eval-out/eval-offline-cooperative-adversarial.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval-out/
