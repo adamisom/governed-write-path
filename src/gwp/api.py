@@ -1,0 +1,132 @@
+"""AWS Lambda handler behind API Gateway (HTTP API, payload format 2.0), plus the scheduled staleness check.
+
+Routes:
+    POST /documents             upload a document (base64 body) and process it
+    GET  /runs/{run_id}         a run's outcome, reason and cost
+    GET  /approvals             pending approvals, each shown code checks first
+    POST /approvals/{audit_id}  {"decision": "approve" | "decline", "note": "..."}
+    POST /reverts/{audit_id}    revert an applied write, or get the recorded refusal
+
+Authentication in v0 is one API key per role, as the spec says. Each key maps to
+a principal, a role and a tenant, so the tenant always comes from the key and
+never from the request. Keys are stored hashed in the GWP_API_KEYS environment
+variable (JSON: {sha256(key): {"principal_id", "role", "tenant_id"}}); on AWS it
+is filled from Secrets Manager by Terraform.
+
+Written and tested against moto; never deployed.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from typing import Any, Callable
+
+from .orchestrator import InvalidDecision, NotAllowed, Orchestrator
+from .runtime import sha256_hex
+from .schema import Principal, Role
+
+_ORCH: Orchestrator | None = None
+_FACTORY: Callable[[], Orchestrator] | None = None
+
+
+def set_orchestrator_factory(factory: Callable[[], Orchestrator] | None) -> None:
+    """Tests inject an orchestrator with scripted models; production builds one from the environment."""
+    global _FACTORY, _ORCH
+    _FACTORY, _ORCH = factory, None
+
+
+def _default_orchestrator() -> Orchestrator:
+    from .agents.strands_agents import DEFAULT_MODELS, StrandsProposer, StrandsReader, live_model
+    from .blobs import S3Blobs
+    from .runtime import Clock, UuidIds
+    from .store import DynamoStore
+
+    provider = os.environ.get("GWP_MODEL_PROVIDER", "bedrock")
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    reader_id = os.environ.get("GWP_READER_MODEL", DEFAULT_MODELS[provider]["reader"])
+    proposer_id = os.environ.get("GWP_PROPOSER_MODEL", DEFAULT_MODELS[provider]["proposer"])
+    store = DynamoStore(records_table=os.environ["GWP_RECORDS_TABLE"], audit_table=os.environ["GWP_AUDIT_TABLE"],
+                        region=region)
+    return Orchestrator(
+        store, S3Blobs(os.environ["GWP_DOCUMENT_BUCKET"], region=region),
+        StrandsReader(live_model(provider, reader_id, region=region), reader_id, budget_s=30),
+        StrandsProposer(live_model(provider, proposer_id, region=region), proposer_id, budget_s=60),
+        Clock(), UuidIds(),
+    )
+
+
+def _orchestrator() -> Orchestrator:
+    global _ORCH
+    if _ORCH is None:
+        _ORCH = (_FACTORY or _default_orchestrator)()
+    return _ORCH
+
+
+def _principal(headers: dict) -> tuple[Principal, str] | None:
+    key = headers.get("x-api-key") or headers.get("X-Api-Key")
+    if not key:
+        return None
+    table = json.loads(os.environ.get("GWP_API_KEYS", "{}"))
+    entry = table.get(sha256_hex(key))
+    if not entry:
+        return None
+    return Principal(principal_id=entry["principal_id"], role=Role(entry["role"])), entry["tenant_id"]
+
+
+def _resp(status: int, body: Any) -> dict:
+    return {"statusCode": status, "headers": {"content-type": "application/json"},
+            "body": json.dumps(body, default=str)}
+
+
+def handler(event: dict, context: Any = None) -> dict:
+    if event.get("source") == "gwp.staleness":
+        stale = _orchestrator().stale()
+        print(json.dumps({"stale_audit_records": stale}))  # CloudWatch picks this up; an alarm can watch it
+        return {"stale": len(stale)}
+
+    auth = _principal(event.get("headers") or {})
+    if auth is None:
+        return _resp(401, {"error": "unauthorized"})
+    principal, tenant = auth
+    method = event["requestContext"]["http"]["method"]
+    parts = [p for p in event.get("rawPath", "/").split("/") if p]
+    orch = _orchestrator()
+    try:
+        if method == "POST" and parts == ["documents"]:
+            raw = event.get("body") or ""
+            data = base64.b64decode(raw) if event.get("isBase64Encoded") else raw.encode()
+            ctype = (event.get("headers") or {}).get("content-type", "application/pdf")
+            up = orch.upload(tenant, data, ctype, principal)
+            if up.duplicate:
+                return _resp(200, {"run_id": up.run_id, "outcome": up.outcome})
+            res = orch.process(tenant, up.run_id)
+            return _resp(201, {"run_id": res.run_id, "outcome": res.outcome, "reason": res.reason,
+                               "audit_ids": res.audit_ids})
+        if method == "GET" and len(parts) == 2 and parts[0] == "runs":
+            run = orch.store.get_run(tenant, parts[1])
+            if run is None:
+                return _resp(404, {"error": "not found"})
+            return _resp(200, {k: run.get(k) for k in ("run_id", "state", "outcome", "reason", "reasons", "cost_usd",
+                                                        "latency_ms", "audit_ids")})
+        if method == "GET" and parts == ["approvals"]:
+            if principal.role not in (Role.approver, Role.admin):
+                return _resp(403, {"error": "forbidden"})
+            pending = [a for a in orch.store.list_audits(tenant) if a["status"] == "pending_approval"]
+            return _resp(200, [{"audit_id": a["audit_id"], **orch.approval_view(tenant, a["audit_id"])}
+                               for a in pending])
+        if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+            body = json.loads(event.get("body") or "{}")
+            res = orch.approve(tenant, parts[1], principal, body.get("decision"), body.get("note"))
+            return _resp(409 if res.status == "already_decided" else 200, res.__dict__)
+        if method == "POST" and len(parts) == 2 and parts[0] == "reverts":
+            res = orch.revert(tenant, parts[1], principal)
+            return _resp(200 if res.outcome == "REVERTED" else 409, res.__dict__)
+    except NotAllowed as e:
+        return _resp(403, {"error": str(e)})
+    except InvalidDecision as e:
+        return _resp(400, {"error": str(e)})
+    except KeyError:
+        return _resp(404, {"error": "not found"})
+    return _resp(404, {"error": "no such route"})

@@ -16,6 +16,10 @@ def _pct(x: float | None) -> str:
     return "n/a" if x is None else f"{100 * x:.1f}%"
 
 
+def _ms(x: float | None) -> str:
+    return "n/a" if x is None else f"{x:.0f} ms"
+
+
 def predictions(script: str, grades: list[Grade], cases: list[Case]) -> dict:
     """Compare the spec's advance predictions with what happened."""
     by_id = {c.id: c for c in cases}
@@ -68,7 +72,7 @@ def build(results: dict[str, list[Grade]], cases: list[Case], mode: str, meta: d
             f"| Cost per run{' (synthetic)' if cost['synthetic'] else ''} | ${cost['per_run_usd']} |",
             f"| Cost per successful task{' (synthetic)' if cost['synthetic'] else ''} | ${cost['per_successful_task_usd']} |",
             f"| Tokens in / out{' (synthetic)' if cost['synthetic'] else ''} | {cost['input_tokens']} / {cost['output_tokens']} over {cost['model_calls']} model calls and {cost['runs']} runs |",
-            f"| Run latency p50 / p95 (harness only) | {m['latency_ms']['run_p50']} ms / {m['latency_ms']['run_p95']} ms |",
+            f"| Run latency p50 / p95 (harness only) | {_ms(m['latency_ms']['run_p50'])} / {_ms(m['latency_ms']['run_p95'])} |",
             f"| Retrieval recall | {_pct(m['retrieval_recall'])} |",
             "",
         ]
