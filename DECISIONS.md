@@ -318,3 +318,12 @@ Source: build, recorded after the audit (finding 17).
 - **Context.** The research recommended an audit table the Lambda can only `PutItem` to, so records are append-only.
 - **Choice.** The Lambda role has `UpdateItem` on the audit table, because each audit record moves through statuses with compare-and-set updates, and the apply transaction updates it together with the domain write. The history list only grows, and no role has `DeleteItem`. An append-only design would write one item per status change instead, and that is not built.
 
+
+## 40. The Lambda role grants item actions, not a transaction action
+
+Source: build, after the Codex review (finding 1).
+
+- **Context.** The Codex review said the Lambda role needs `dynamodb:TransactWriteItems` on both tables, or every transaction would be denied.
+- **Evidence.** IAM has no such action. The AWS Service Authorization Reference for DynamoDB, as packaged in `policy_sentry` 0.15.2 (78 actions) and `parliament` 1.6.4 (71 actions), lists no `TransactWriteItems` or `TransactGetItems` action. AWS authorizes each operation inside a transaction by its item action: a Put by `dynamodb:PutItem`, an Update by `dynamodb:UpdateItem`, a ConditionCheck by `dynamodb:ConditionCheckItem` and a Delete by `dynamodb:DeleteItem`.
+- **Choice.** The policy is unchanged. `tests/test_infra.py` records every DynamoDB call the code makes through the API handler and the 27 clean, approval, revert, duplicate and isolation eval cases, maps each call and each operation inside a transaction to its item action on its table or index, and checks that `lambda.tf` grants it. Removing `UpdateItem` from the audit statement makes the test fail.
+- **Still open.** No `terraform plan` or deployed smoke test has run, so the policy has only been checked against the reference, not against AWS.

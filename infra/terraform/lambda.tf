@@ -16,7 +16,9 @@ resource "aws_iam_role" "lambda" {
 }
 
 # Least privilege. There is no DeleteItem on either table: nothing in the write path deletes, and a
-# revert is a compensating write. TransactWriteItems needs the per-item actions it performs.
+# revert is a compensating write. IAM has no TransactWriteItems action: each operation inside a transaction
+# is authorized by its item action (PutItem, UpdateItem, ConditionCheckItem, DeleteItem) on its table.
+# tests/test_infra.py checks that these statements grant every item action the code calls on each table.
 resource "aws_iam_role_policy" "lambda" {
   name = "${var.name}-lambda"
   role = aws_iam_role.lambda.id
