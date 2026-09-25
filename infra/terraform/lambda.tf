@@ -73,7 +73,9 @@ resource "aws_lambda_function" "api" {
   filename         = var.lambda_zip
   source_code_hash = filebase64sha256(var.lambda_zip)
   memory_size      = 1024
-  # Reader budget 30 s and proposer 60 s, each with one retry and backoff, plus the writes.
+  # Reader budget 30 s and proposer 60 s, each with one retry and backoff, plus the writes. This is the
+  # asynchronous processing invocation's budget. The API request itself only stores the document and returns
+  # 202, because an HTTP API integration times out at about 30 seconds (verify the current limit before deploy).
   timeout = 240
   # A hard cap on concurrent model calls, so a public endpoint can't run up a bill quickly.
   reserved_concurrent_executions = 2
@@ -91,4 +93,28 @@ resource "aws_lambda_function" "api" {
   }
 
   depends_on = [aws_cloudwatch_log_group.api]
+}
+
+# POST /documents hands processing to an asynchronous invocation of this same function. The role may invoke only
+# this function. A separate policy resource avoids a cycle between the role and the function.
+resource "aws_iam_role_policy" "lambda_self_invoke" {
+  name = "${var.name}-lambda-self-invoke"
+  role = aws_iam_role.lambda.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "ProcessAsync"
+      Effect   = "Allow"
+      Action   = "lambda:InvokeFunction"
+      Resource = aws_lambda_function.api.arn
+    }]
+  })
+}
+
+# One redelivery at most. process() claims a run with a conditional update, so a redelivered event is a no-op
+# for a run that is already being processed or is finished.
+resource "aws_lambda_function_event_invoke_config" "api" {
+  function_name                = aws_lambda_function.api.function_name
+  maximum_retry_attempts       = 1
+  maximum_event_age_in_seconds = 3600
 }

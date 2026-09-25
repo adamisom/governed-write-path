@@ -24,8 +24,12 @@ def orch(store, monkeypatch):
     o, _, _ = build(store, [{"tool": "Extraction", "input": ext}],
                     [{"tool": "propose_write", "input": {"proposals": [c01_post(requires_approval_reason="x")]}}])
     api.set_orchestrator_factory(lambda: o)
+    queued = []
+    api.set_dispatcher(lambda tenant, run_id, context: queued.append((tenant, run_id)))
+    o.queued = queued
     yield o
     api.set_orchestrator_factory(None)
+    api.set_dispatcher(None)
 
 
 def _event(method, path, key, body=None, b64=False):
@@ -37,10 +41,20 @@ def _event(method, path, key, body=None, b64=False):
 def test_upload_approve_and_tenant_binding(orch):
     pdf = base64.b64encode(documents.render(C01_DOC)).decode()
     r = api.handler(_event("POST", "/documents", "up-key", pdf, True))
-    assert r["statusCode"] == 201
+    # Audit finding 7: the request returns before any model is called, and processing is dispatched.
+    assert r["statusCode"] == 202
     body = json.loads(r["body"])
-    assert body["outcome"] == "PENDING_APPROVAL"
-    aid = body["audit_ids"][0]
+    assert body["state"] == "received" and orch.queued == [("T1", body["run_id"])]
+    run_path = f"/runs/{body['run_id']}"
+    assert json.loads(api.handler(_event("GET", run_path, "up-key"))["body"])["state"] == "received"
+    done = api.handler({"source": "gwp.process", "tenant_id": "T1", "run_id": body["run_id"]})
+    assert done["outcome"] == "PENDING_APPROVAL"
+    # A redelivered processing event calls no model and changes nothing.
+    assert api.handler({"source": "gwp.process", "tenant_id": "T1", "run_id": body["run_id"]})["outcome"] == \
+        "PENDING_APPROVAL"
+    run = json.loads(api.handler(_event("GET", run_path, "up-key"))["body"])
+    assert run["outcome"] == "PENDING_APPROVAL"
+    aid = run["audit_ids"][0]
 
     assert api.handler(_event("GET", "/approvals", "up-key"))["statusCode"] == 403
     listing = json.loads(api.handler(_event("GET", "/approvals", "ap-key"))["body"])
@@ -70,3 +84,23 @@ def test_unknown_key_is_rejected(orch):
 
 def test_scheduled_staleness_event(orch):
     assert api.handler({"source": "gwp.staleness"}) == {"stale": 0}
+
+
+def test_default_dispatch_invokes_this_function_asynchronously(monkeypatch):
+    import boto3
+
+    calls = []
+
+    class FakeLambda:
+        def invoke(self, **kw):
+            calls.append(kw)
+
+    monkeypatch.setattr(boto3, "client", lambda name, **kw: FakeLambda() if name == "lambda" else None)
+
+    class Ctx:
+        invoked_function_arn = "arn:aws:lambda:us-east-1:111122223333:function:gwp-api"
+
+    api._default_dispatch("T1", "R-1", Ctx())
+    (call,) = calls
+    assert call["InvocationType"] == "Event" and call["FunctionName"] == Ctx.invoked_function_arn
+    assert json.loads(call["Payload"]) == {"source": "gwp.process", "tenant_id": "T1", "run_id": "R-1"}

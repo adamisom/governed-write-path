@@ -1,17 +1,27 @@
 """AWS Lambda handler behind API Gateway (HTTP API, payload format 2.0), plus the scheduled staleness check.
 
 Routes:
-    POST /documents             upload a document (base64 body) and process it
-    GET  /runs/{run_id}         a run's outcome, reason and cost
+    POST /documents             upload a document (base64 body); 202 with the run id, processing runs async
+    GET  /runs/{run_id}         a run's state, outcome, reason, cost and applied writes
     GET  /approvals             pending approvals, each shown code checks first
     POST /approvals/{audit_id}  {"decision": "approve" | "decline", "note": "..."}
     POST /reverts/{audit_id}    revert an applied write, or get the recorded refusal
 
+Processing a document calls two models with budgets of 30 and 60 seconds, each
+with one retry, which does not fit API Gateway's HTTP API integration timeout of
+about 30 seconds. So `POST /documents` stores the document, creates the run,
+hands processing to an asynchronous invocation of this same function (event
+`{"source": "gwp.process", ...}`), and returns 202 at once. The client polls
+`GET /runs/{run_id}`. A redelivered processing event is safe: `process` claims
+the run with a conditional update, so a second delivery returns IN_PROGRESS or
+the finished outcome and calls no model.
+
 Authentication in v0 is one API key per role, as the spec says. Each key maps to
 a principal, a role and a tenant, so the tenant always comes from the key and
 never from the request. Keys are stored hashed in the GWP_API_KEYS environment
-variable (JSON: {sha256(key): {"principal_id", "role", "tenant_id"}}); on AWS it
-is filled from Secrets Manager by Terraform.
+variable (JSON: {sha256(key): {"principal_id", "role", "tenant_id"}}). Terraform
+sets that variable from a Terraform variable today; moving it to Secrets Manager
+is an open item.
 
 Written and tested against moto; never deployed.
 """
@@ -29,6 +39,8 @@ from .schema import Principal, Role
 
 _ORCH: Orchestrator | None = None
 _FACTORY: Callable[[], Orchestrator] | None = None
+_DISPATCH: Callable[[str, str, Any], None] | None = None
+PROCESS_EVENT = "gwp.process"
 
 
 def set_orchestrator_factory(factory: Callable[[], Orchestrator] | None) -> None:
@@ -57,6 +69,25 @@ def _default_orchestrator() -> Orchestrator:
     )
 
 
+def set_dispatcher(dispatch: Callable[[str, str, Any], None] | None) -> None:
+    """Tests inject a dispatcher; on Lambda the default invokes this function asynchronously."""
+    global _DISPATCH
+    _DISPATCH = dispatch
+
+
+def _default_dispatch(tenant_id: str, run_id: str, context: Any) -> None:
+    arn = getattr(context, "invoked_function_arn", None)
+    if arn is None:
+        # Not on Lambda (a local run): process in this call. The response is still 202 with the run id.
+        _orchestrator().process(tenant_id, run_id)
+        return
+    import boto3
+
+    boto3.client("lambda").invoke(FunctionName=arn, InvocationType="Event",
+                                  Payload=json.dumps({"source": PROCESS_EVENT, "tenant_id": tenant_id,
+                                                      "run_id": run_id}).encode())
+
+
 def _orchestrator() -> Orchestrator:
     global _ORCH
     if _ORCH is None:
@@ -81,6 +112,10 @@ def _resp(status: int, body: Any) -> dict:
 
 
 def handler(event: dict, context: Any = None) -> dict:
+    if event.get("source") == PROCESS_EVENT:
+        # An asynchronous invocation from POST /documents. API Gateway events never carry a top-level "source".
+        res = _orchestrator().process(event["tenant_id"], event["run_id"])
+        return {"run_id": res.run_id, "outcome": res.outcome}
     if event.get("source") == "gwp.staleness":
         stale = _orchestrator().stale()
         print(json.dumps({"stale_audit_records": stale}))  # CloudWatch picks this up; an alarm can watch it
@@ -101,15 +136,14 @@ def handler(event: dict, context: Any = None) -> dict:
             up = orch.upload(tenant, data, ctype, principal)
             if up.duplicate:
                 return _resp(200, {"run_id": up.run_id, "outcome": up.outcome})
-            res = orch.process(tenant, up.run_id)
-            return _resp(201, {"run_id": res.run_id, "outcome": res.outcome, "reason": res.reason,
-                               "audit_ids": res.audit_ids})
+            (_DISPATCH or _default_dispatch)(tenant, up.run_id, context)
+            return _resp(202, {"run_id": up.run_id, "document_id": up.document_id, "state": "received"})
         if method == "GET" and len(parts) == 2 and parts[0] == "runs":
             run = orch.store.get_run(tenant, parts[1])
             if run is None:
                 return _resp(404, {"error": "not found"})
             return _resp(200, {k: run.get(k) for k in ("run_id", "state", "outcome", "reason", "reasons", "cost_usd",
-                                                        "latency_ms", "audit_ids")})
+                                                        "latency_ms", "audit_ids", "applied_audit_ids")})
         if method == "GET" and parts == ["approvals"]:
             if principal.role not in (Role.approver, Role.admin):
                 return _resp(403, {"error": "forbidden"})
