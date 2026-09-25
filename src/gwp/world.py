@@ -108,16 +108,18 @@ PAYABLES = [
     {"tenant_id": "T1", "payable_id": "P-2", "vendor_id": "V-101", "invoice_number": "INV-5521",
      "invoice_date": "2026-03-12", "po_id": "PO-6990", "contract_id": None, "status": "open",
      "lines": [
-         {"line_no": 1, "kind": "item", "account": "6100", "amount_cents": 45_750, "description": PAPER, "qty": 15,
+         {"line_no": 1, "kind": "item", "account": "6100", "amount_cents": 45_750, "description_untrusted": PAPER,
+          "qty": 15,
           "po_line_no": 1},
-         {"line_no": 2, "kind": "item", "account": "6100", "amount_cents": 19_250, "description": TONER, "qty": 5,
+         {"line_no": 2, "kind": "item", "account": "6100", "amount_cents": 19_250, "description_untrusted": TONER,
+          "qty": 5,
           "po_line_no": 2},
      ],
      "total_cents": 65_000, "credits_cents": 0, "entry_id": "E-2", "created_by_write_id": "W-2"},
     {"tenant_id": "T2", "payable_id": "P-201", "vendor_id": "V-201", "invoice_number": "SDL-88",
      "invoice_date": "2026-07-02", "po_id": None, "contract_id": None, "status": "open",
      "lines": [{"line_no": 1, "kind": "item", "account": "6200", "amount_cents": 30_000,
-                "description": "Crown fabrication", "qty": 1}],
+                "description_untrusted": "Crown fabrication", "qty": 1}],
      "total_cents": 30_000, "credits_cents": 0, "entry_id": "E-201", "created_by_write_id": "W-201"},
 ]
 

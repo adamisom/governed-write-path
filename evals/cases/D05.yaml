@@ -4,7 +4,7 @@ overrides:
   payables:
     - {tenant_id: T1, payable_id: P-3, vendor_id: V-101, invoice_number: INV-1001, invoice_date: "2026-07-01",
        po_id: PO-6990, status: open, total_cents: 30000, entry_id: E-3, created_by_write_id: W-3,
-       lines: [{line_no: 1, kind: item, account: "6100", amount_cents: 30000, description: "Copy paper, letter (ream)", qty: 10}]}
+       lines: [{line_no: 1, kind: item, account: "6100", amount_cents: 30000, description_untrusted: "Copy paper, letter (ream)", qty: 10}]}
   ledger:
     - {tenant_id: T1, entry_id: E-3, payable_id: P-3, write_id: W-3,
        lines: [{account: "6100", debit_cents: 30000, credit_cents: 0}, {account: "2000", debit_cents: 0, credit_cents: 30000}]}

@@ -47,7 +47,7 @@ from .schema import (
     params_dict,
 )
 from .store import DynamoStore
-from .world import tenant_policy
+from .world import normalize_ref, tenant_policy
 
 CODE_VERSION = "gwp-0.1.0"
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
@@ -401,12 +401,28 @@ class Orchestrator:
              "price_schedule": c["price_schedule"],
              "fee_on_invoice_date_cents": contract_fee_for(c, inv_date) if inv_date else None}
             for c in ctx.contracts.values()]
+        # Posted payables were made from earlier uploaded documents, so their free text (line descriptions and
+        # invoice numbers) is attacker text. None of it is shown here. Item names come from the purchase order,
+        # a trusted record, and the invoice number is replaced by code-computed matches against this document.
+        ext = ctx.extraction
+        this_number = normalize_ref(ext.invoice_number or "")
+        referenced = {normalize_ref(r) for r in ext.referenced_invoice_numbers}
+        po_items: dict[str, dict[int, str]] = {}
+        for p in ctx.payables.values():
+            if p.get("po_id") and p["po_id"] not in po_items:
+                po = self.store.get_po(ctx.tenant_id, p["po_id"]) or {"lines": []}
+                po_items[p["po_id"]] = {pl["line_no"]: pl["item"] for pl in po["lines"]}
         out["posted_payables"] = [
-            {"payable_id": p["payable_id"], "invoice_number": p["invoice_number"],
-             "invoice_date": p["invoice_date"], "po_id": p.get("po_id"), "status": p["status"],
+            {"payable_id": p["payable_id"], "invoice_date": p["invoice_date"], "po_id": p.get("po_id"),
+             "contract_id": p.get("contract_id"), "status": p["status"],
              "total_cents": p["total_cents"], "credits_cents": p.get("credits_cents", 0),
-             "lines": [{"description": ln.get("description", ""), "qty": ln.get("qty"),
-                        "account": ln["account"], "amount_cents": ln["amount_cents"]} for ln in p["lines"]]}
+             "invoice_number_same_as_this_document": bool(this_number)
+             and normalize_ref(p["invoice_number"]) == this_number,
+             "invoice_number_referenced_by_this_document": normalize_ref(p["invoice_number"]) in referenced,
+             "lines": [{"line_no": ln["line_no"], "kind": ln.get("kind", "item"), "po_line_no": ln.get("po_line_no"),
+                        "item_from_po": po_items.get(p.get("po_id") or "", {}).get(ln.get("po_line_no") or 0),
+                        "qty": ln.get("qty"), "account": ln["account"], "amount_cents": ln["amount_cents"]}
+                       for ln in p["lines"]]}
             for p in ctx.payables.values()]
         return out
 
@@ -460,7 +476,8 @@ class Orchestrator:
             src = ext.lines[ln.source_line - 1] if ln.source_line and ln.source_line <= len(ext.lines) else None
             out.append({"line_no": i + 1, "kind": ln.kind, "account": ln.account, "amount_cents": ln.amount_cents,
                         "po_line_no": ln.po_line_no if ln.kind == "item" else None,
-                        "description": src.description if src else ln.kind,
+                        # Stored under a name that says what it is. It is never shown to a model again.
+                        "description_untrusted": src.description if src else ln.kind,
                         "qty": src.qty if src else 0, "source_line": ln.source_line})
         return out
 
