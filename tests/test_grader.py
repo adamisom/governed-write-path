@@ -8,6 +8,8 @@ from gwp.evals.cases import load_cases
 from gwp.evals.grader import grade
 from gwp.evals.runner import run_case
 
+pytestmark = pytest.mark.eval
+
 CASES = {c.id: c for c in load_cases()}
 
 

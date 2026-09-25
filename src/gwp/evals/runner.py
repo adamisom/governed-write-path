@@ -40,6 +40,7 @@ class LiveConfig:
     reader_model_id: str
     proposer_model_id: str
     region: str | None = None
+    search_enabled: bool = True  # False for the H2 ablation
 
 
 @dataclass
@@ -119,9 +120,10 @@ class _Harness:
             reader = StrandsReader(live_model(live.provider, live.reader_model_id, region=live.region),
                                    live.reader_model_id)
             proposer = StrandsProposer(live_model(live.provider, live.proposer_model_id, region=live.region),
-                                       live.proposer_model_id)
+                                       live.proposer_model_id, search_enabled=live.search_enabled)
         self.blobs = MemoryBlobs()
-        self.orch = Orchestrator(self.store, self.blobs, reader, proposer, self.clock, self.ids, self.executor)
+        self.orch = Orchestrator(self.store, self.blobs, reader, proposer, self.clock, self.ids, self.executor,
+                                 search_enabled=live.search_enabled if live else True)
         self.current_run: str | None = None
         self.current_doc = "main"
         self.process_index = 0

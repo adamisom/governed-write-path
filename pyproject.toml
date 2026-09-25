@@ -39,3 +39,4 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["eval: runs whole eval cases end to end (about 25 seconds)"]

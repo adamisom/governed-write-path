@@ -47,7 +47,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
             return 2
         models = DEFAULT_MODELS[args.provider]
         live = LiveConfig(args.provider, args.reader_model or models["reader"],
-                          args.proposer_model or models["proposer"], args.region)
+                          args.proposer_model or models["proposer"], args.region, not args.disable_search)
         cases = [c for c in cases if not c.offline_only]
         scripts = ["live"]
     else:
@@ -113,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--repeats", type=int, default=3, help="live mode: runs per case")
     e.add_argument("--max-usd", type=float, default=0.0, help="live mode: stop when spend reaches this")
     e.add_argument("--confirm-spend", action="store_true")
+    e.add_argument("--disable-search", action="store_true",
+                   help="live mode: remove the proposer's search tool (the H2 ablation)")
     e.add_argument("--fail-on-regression", action="store_true",
                    help="offline: exit 1 if any cooperative case fails or an unpredicted case is unsafe")
     e.set_defaults(func=cmd_eval)

@@ -474,7 +474,9 @@ class Orchestrator:
             return RunResult(run_id, run["outcome"], run.get("reason"), run.get("audit_ids", []))
         audits = self.store.list_audits(tenant_id, run_id)
         if not audits:
-            # Died before any audit record existed, so nothing was proposed or written. Start again.
+            # Died before any audit record existed, so nothing was proposed or written. A person decides.
+            self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
+                                                      "reason": "interrupted"}, ("finalized_on_resume", self.clock.now()))
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted")
         for a in audits:
             if a["status"] == "proposed" and a["tier"] == Tier.auto:

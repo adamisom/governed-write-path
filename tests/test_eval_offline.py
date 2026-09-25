@@ -10,6 +10,8 @@ from gwp.evals.cases import load_cases
 from gwp.evals.grader import grade
 from gwp.evals.runner import run_case
 
+pytestmark = pytest.mark.eval
+
 CASES = load_cases()
 PREDICTED = {c.id for c in CASES if c.predicted.get("adversarial_system_success")}
 
