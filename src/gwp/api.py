@@ -117,9 +117,12 @@ def handler(event: dict, context: Any = None) -> dict:
         res = _orchestrator().process(event["tenant_id"], event["run_id"])
         return {"run_id": res.run_id, "outcome": res.outcome}
     if event.get("source") == "gwp.staleness":
-        stale = _orchestrator().stale()
-        print(json.dumps({"stale_audit_records": stale}))  # CloudWatch picks this up; an alarm can watch it
-        return {"stale": len(stale)}
+        orch = _orchestrator()
+        stranded = orch.recover_stranded()  # first, so records it finishes don't show as stale
+        stale = orch.stale()
+        # CloudWatch picks these lines up; an alarm can watch them.
+        print(json.dumps({"stranded_runs_resumed": stranded, "stale_audit_records": stale}))
+        return {"stale": len(stale), "stranded": len(stranded)}
 
     auth = _principal(event.get("headers") or {})
     if auth is None:

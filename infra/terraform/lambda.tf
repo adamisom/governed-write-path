@@ -36,7 +36,7 @@ resource "aws_iam_role_policy" "lambda" {
         Effect = "Allow"
         Action = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem", "dynamodb:UpdateItem",
         "dynamodb:ConditionCheckItem"]
-        Resource = [aws_dynamodb_table.records.arn]
+        Resource = [aws_dynamodb_table.records.arn, "${aws_dynamodb_table.records.arn}/index/leased_runs"]
       },
       {
         Sid      = "Audit"
@@ -114,7 +114,9 @@ resource "aws_iam_role_policy" "lambda_self_invoke" {
 }
 
 # One redelivery at most. process() claims a run with a conditional update, so a redelivered event is a no-op
-# for a run that is already being processed or is finished.
+# for a run that is already being processed or is finished. A run whose worker died is resumed once its lease
+# runs out, by a redelivered event or by the scheduled sweep. The lease (RUN_LEASE_SECONDS in orchestrator.py)
+# must outlast the timeout above, and DISPATCH_LEASE_SECONDS must cover maximum_event_age_in_seconds.
 resource "aws_lambda_function_event_invoke_config" "api" {
   function_name                = aws_lambda_function.api.function_name
   maximum_retry_attempts       = 1

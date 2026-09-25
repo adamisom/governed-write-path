@@ -639,3 +639,92 @@ def test_resume_opens_an_interrupted_task_even_when_the_run_already_has_another_
     assert sorted(t["reason_code"] for t in store.list_human_tasks("T1")) == [
         "interrupted", "vendor_requested_bank_change"]
     assert not any(p["invoice_number"] == "INV-BANK" for p in store.list_payables("T1", "V-101"))
+
+
+# -- a worker that dies after claiming a run (Codex review finding 2) ----------------------------------------
+
+
+class _Die(BaseException):
+    """Stands in for the Lambda being killed, e.g. at its timeout. Not an Exception, so nothing catches it."""
+
+
+def _die_in_reader(store, invoice_number="INV-6001", clock=None):
+    """Upload C01 and run a worker that dies inside the reader call, after it claimed the run."""
+    doc = {**C01_DOC, "invoice_number": invoice_number}
+    clock = clock or FakeClock()
+    orch, rm, pm = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(doc)}],
+                         [{"tool": "propose_write", "input": {"proposals": [
+                             c01_post(params={"invoice_number": invoice_number})]}}], clock=clock)
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    real = orch.reader.read
+    orch.reader.read = lambda *a, **k: (_ for _ in ()).throw(_Die())
+    with pytest.raises(_Die):
+        orch.process("T1", up.run_id)
+    orch.reader.read = real
+    return orch, up, clock
+
+
+def test_a_worker_that_dies_after_the_claim_is_found_and_finished_by_the_sweep(store):
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    orch, up, clock = _die_in_reader(store)
+    assert store.get_run("T1", up.run_id)["state"] == "text_extracted"
+    # The async retry arrives while the lease still holds: it must not start a second worker.
+    assert orch.process("T1", up.run_id).outcome == "IN_PROGRESS"
+    assert orch.recover_stranded() == []
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    (found,) = orch.recover_stranded()
+    assert (found["run_id"], found["state"], found["outcome"]) == (up.run_id, "text_extracted", "NEEDS_HUMAN")
+    run = store.get_run("T1", up.run_id)
+    assert (run["state"], run["outcome"], run["reason"]) == ("finalized", "NEEDS_HUMAN", "interrupted")
+    assert "lease_until" not in run and "lease_flag" not in run
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
+    assert len(store.list_payables("T1", "V-101")) == 1  # only the seeded P-2
+    assert orch.recover_stranded() == []  # a finalized run leaves the index
+
+
+def test_a_redelivered_event_after_the_lease_expires_finishes_the_run(store):
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    orch, up, clock = _die_in_reader(store)
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    res = orch.process("T1", up.run_id)
+    assert (res.outcome, res.reason) == ("NEEDS_HUMAN", "interrupted")
+    assert orch.process("T1", up.run_id).outcome == "NEEDS_HUMAN"
+
+
+def test_the_sweep_finishes_a_run_whose_worker_died_after_the_audit_set(store):
+    """The worker dies before moving an approval record to pending_approval; the sweep finishes the set."""
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    clock = FakeClock()
+    doc = {**C01_DOC, "invoice_number": "INV-LATE"}
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(doc)}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(requires_approval_reason="x", params={"invoice_number": "INV-LATE"})]}}],
+                       clock=clock)
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    real = store.transition_audit
+    store.transition_audit = lambda *a, **k: (_ for _ in ()).throw(_Die())
+    with pytest.raises(_Die):
+        orch.process("T1", up.run_id)
+    store.transition_audit = real
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    (found,) = orch.recover_stranded()
+    assert found["outcome"] == "PENDING_APPROVAL"
+    assert [a["status"] for a in store.list_audits("T1", up.run_id)] == ["pending_approval"]
+
+
+def test_a_run_whose_processing_event_never_arrived_is_found_by_the_sweep(store):
+    from gwp.orchestrator import DISPATCH_LEASE_SECONDS
+
+    clock = FakeClock()
+    orch, rm, _ = build(store, [], [], clock=clock)
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    assert orch.recover_stranded() == []
+    clock.advance(DISPATCH_LEASE_SECONDS + 1)
+    (found,) = orch.recover_stranded()
+    assert (found["state"], found["outcome"]) == ("received", "NEEDS_HUMAN")
+    assert rm.calls == 0
+    # If the event does arrive late, it finds the run finished and calls no model.
+    assert orch.process("T1", up.run_id).outcome == "NEEDS_HUMAN" and rm.calls == 0

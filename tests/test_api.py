@@ -83,7 +83,7 @@ def test_unknown_key_is_rejected(orch):
 
 
 def test_scheduled_staleness_event(orch):
-    assert api.handler({"source": "gwp.staleness"}) == {"stale": 0}
+    assert api.handler({"source": "gwp.staleness"}) == {"stale": 0, "stranded": 0}
 
 
 def test_default_dispatch_invokes_this_function_asynchronously(monkeypatch):

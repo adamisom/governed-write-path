@@ -17,6 +17,12 @@ def sha256_hex(*parts: str | bytes) -> str:
     return h.hexdigest()
 
 
+def iso_plus(iso: str, seconds: float) -> str:
+    """An ISO time from `Clock.now()` moved by `seconds`, in the same fixed-width format, so strings compare."""
+    t = datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc) + timedelta(seconds=seconds)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 class Clock:
     """Wall clock. `now()` is UTC ISO 8601; `monotonic()` is for latency."""
 

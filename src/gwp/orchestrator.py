@@ -29,7 +29,7 @@ from .executor import Executor, execution_key
 from .pdftext import extract_text
 from .policy import KeyedContext, contract_fee_for, evaluate, validate_references
 from .retrieval import BM25Retriever, Retriever
-from .runtime import Clock, Ids, sha256_hex
+from .runtime import Clock, Ids, iso_plus, sha256_hex
 from .schema import (
     FORBIDDEN_ACTIONS,
     SERVICE_PRINCIPAL,
@@ -51,6 +51,11 @@ from .world import normalize_ref, tenant_policy
 
 CODE_VERSION = "gwp-0.1.0"
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+# A run holds a lease from upload until it is finalized. The scheduled sweep resumes a run whose lease ran out.
+# A worker's lease must outlast the Lambda timeout (240 seconds), so an expired lease means the worker is gone.
+RUN_LEASE_SECONDS = 300
+# Before a worker claims it, the lease covers the async event's maximum age (3600 seconds) plus one run.
+DISPATCH_LEASE_SECONDS = 3600 + RUN_LEASE_SECONDS
 
 
 class NotAllowed(Exception):
@@ -155,7 +160,8 @@ class Orchestrator:
                                  "uploaded_by": principal.principal_id, "uploaded_at": now, "size": len(data)})
         run = {"tenant_id": tenant_id, "run_id": self.ids.new("R"), "document_id": document_id, "run_key": run_key,
                "state": "received", "started_at": now, "outcome": None,
-               "history": [{"state": "received", "at": now}]}
+               "history": [{"state": "received", "at": now}],
+               "lease_flag": "LEASED", "lease_until": iso_plus(now, DISPATCH_LEASE_SECONDS)}
         run, created = self.store.create_run(run, run_key)
         if not created:
             return UploadResult(run["run_id"], run["document_id"], True, RunOutcome.DUPLICATE_UPLOAD)
@@ -170,6 +176,9 @@ class Orchestrator:
         if run["state"] == "finalized":
             return RunResult(run_id, run.get("outcome") or "", run.get("reason"), run.get("audit_ids", []))
         if run["state"] != "received":
+            if run.get("lease_until") and run["lease_until"] < self.clock.now():
+                # The worker that claimed this run is gone, since a lease outlasts the Lambda timeout.
+                return self.resume(tenant_id, run_id)
             # Another worker holds this run. Say so instead of returning an empty outcome.
             return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
         t0 = self.clock.monotonic()
@@ -194,9 +203,12 @@ class Orchestrator:
         # Step 2: text extraction.
         text, pages = extract_text(self.blobs.get(doc["storage_key"]), doc["content_type"])
         # Claim the run with a conditional update, so two workers that both read "received" can't both go on.
+        # The claim starts this worker's lease; the sweep resumes the run if the lease runs out.
+        now = self.clock.now()
         claimed = self.store.update_run(tenant_id, run_id, {"state": "text_extracted", "page_count": pages,
-                                                            "char_count": len(text)},
-                                        ("text_extracted", self.clock.now()), expect_state="received")
+                                                            "char_count": len(text),
+                                                            "lease_until": iso_plus(now, RUN_LEASE_SECONDS)},
+                                        ("text_extracted", now), expect_state="received")
         if not claimed:
             return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
 
@@ -525,9 +537,13 @@ class Orchestrator:
         if not audits:
             if finalized:
                 return RunResult(run_id, run["outcome"], run.get("reason"), [])
-            # Died before any audit record existed, so nothing was proposed or written. A person decides.
-            self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
-                                                      "reason": "interrupted"}, ("finalized_on_resume", now))
+            # Died before any audit record existed, so nothing was proposed or written. A person decides. The
+            # update is conditional on the state read here, so a worker that claims the run meanwhile wins.
+            if not self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
+                                                             "reason": "interrupted"}, ("finalized_on_resume", now),
+                                         expect_state=run["state"]):
+                return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
+            self._ensure_task(tenant_id, run_id, "interrupted")
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted")
         audit_ids = [a["audit_id"] for a in audits]
         if not run.get("audit_set_complete"):
@@ -651,7 +667,22 @@ class Orchestrator:
             return RevertResult("REVERTED", already=res.status == "already_reverted")
         return RevertResult("REVERT_REFUSED", res.refusal_reason)
 
-    # -- step 15: staleness --------------------------------------------------------------------
+    # -- step 15: staleness and stranded runs ---------------------------------------------------
+
+    def recover_stranded(self, now_iso: str | None = None) -> list[dict]:
+        """Resume every run whose lease ran out: its worker died, or its processing event never arrived.
+
+        Without this, a worker killed after claiming a run and before writing any audit record left the run in
+        flight for good: a redelivered event saw a claimed run and stopped, and the audit staleness check had
+        nothing to find.
+        """
+        now = now_iso or self.clock.now()
+        out = []
+        for run in self.store.list_expired_leases(now):
+            res = self.resume(run["tenant_id"], run["run_id"])
+            out.append({"tenant_id": run["tenant_id"], "run_id": run["run_id"], "state": run["state"],
+                        "lease_until": run["lease_until"], "outcome": res.outcome})
+        return out
 
     def stale(self, now_iso: str | None = None, minutes: int = 15) -> list[dict]:
         now = datetime.strptime((now_iso or self.clock.now())[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)

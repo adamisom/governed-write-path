@@ -155,3 +155,22 @@ def test_lambda_policy_grants_every_dynamodb_action_the_code_uses(recorded, monk
     grants = lambda_policy_grants((TF / "lambda.tf").read_text())
     missing = sorted((n for n in needed if n not in grants), key=str)
     assert missing == [], f"lambda.tf does not grant {missing}"
+
+
+def test_run_leases_outlast_the_lambda_timeout_and_the_async_event_age():
+    """Codex review finding 2: the sweep may resume a run only once its worker can no longer be running."""
+    from gwp.orchestrator import DISPATCH_LEASE_SECONDS, RUN_LEASE_SECONDS
+
+    tf = (TF / "lambda.tf").read_text()
+    timeout = int(re.search(r"^\s*timeout\s*=\s*(\d+)", tf, re.M).group(1))
+    event_age = int(re.search(r"maximum_event_age_in_seconds\s*=\s*(\d+)", tf).group(1))
+    assert timeout < RUN_LEASE_SECONDS
+    assert event_age + RUN_LEASE_SECONDS <= DISPATCH_LEASE_SECONDS
+
+
+def test_the_records_table_has_the_leased_runs_index_the_store_queries():
+    from gwp.store import LEASE_INDEX
+
+    records = (TF / "storage.tf").read_text().split('resource "aws_dynamodb_table" "audit"')[0]
+    assert f'name            = "{LEASE_INDEX}"' in records
+    assert 'hash_key        = "lease_flag"' in records and 'range_key       = "lease_until"' in records

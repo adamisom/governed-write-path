@@ -5,6 +5,9 @@ Two tables:
 - records: the tenant's vendors, purchase orders, receipts, contracts, policy
   chunks, documents, runs, payables, ledger entries, outbox messages, human
   tasks, and the idempotency key items. Partition key `pk`, sort key `sk`.
+  The records table has a sparse index on `lease_flag` and `lease_until`, which
+  lists runs that are not finalized, so the sweep can find a run whose worker
+  died without scanning.
 - audit: one audit record per proposed write. It has a sparse index on
   `open_flag` and `open_since`, so the staleness check can list records that are
   still in a non-terminal state without scanning.
@@ -34,6 +37,9 @@ from botocore.exceptions import ClientError
 
 RECORDS = "records"
 AUDIT = "audit"
+# Sparse index on the records table. A run carries `lease_flag` and `lease_until` from upload until it is
+# finalized, so the index lists exactly the runs that are not finished, by when their lease runs out.
+LEASE_INDEX = "leased_runs"
 
 _ser = TypeSerializer()
 _de = TypeDeserializer()
@@ -150,7 +156,22 @@ class DynamoStore:
             ],
             BillingMode="PAY_PER_REQUEST",
         )
-        self.client.create_table(TableName=self.tables[RECORDS], **keys)
+        records = dict(keys)
+        records["AttributeDefinitions"] = keys["AttributeDefinitions"] + [
+            {"AttributeName": "lease_flag", "AttributeType": "S"},
+            {"AttributeName": "lease_until", "AttributeType": "S"},
+        ]
+        records["GlobalSecondaryIndexes"] = [
+            {
+                "IndexName": LEASE_INDEX,
+                "KeySchema": [
+                    {"AttributeName": "lease_flag", "KeyType": "HASH"},
+                    {"AttributeName": "lease_until", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }
+        ]
+        self.client.create_table(TableName=self.tables[RECORDS], **records)
         audit = dict(keys)
         audit["AttributeDefinitions"] = keys["AttributeDefinitions"] + [
             {"AttributeName": "open_flag", "AttributeType": "S"},
@@ -321,7 +342,10 @@ class DynamoStore:
 
     def update_run(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None = None,
                    expect_state: str | None = None) -> bool:
-        """Set fields on a run. With `expect_state`, only if the run is still in that state; returns False if not."""
+        """Set fields on a run. With `expect_state`, only if the run is still in that state; returns False if not.
+
+        Finalizing a run removes its lease, so it leaves the `leased_runs` index.
+        """
         names: dict[str, str] = {}
         values: dict[str, Any] = {}
         condition = "attribute_exists(pk)"
@@ -339,11 +363,15 @@ class DynamoStore:
             values[":h"] = [{"state": history[0], "at": history[1]}]
             values[":empty"] = []
             sets.append("#h = list_append(if_not_exists(#h, :empty), :h)")
+        removes = ""
+        if fields.get("state") == "finalized":
+            names["#lf"], names["#lu"] = "lease_flag", "lease_until"
+            removes = " REMOVE #lf, #lu"
         try:
             self.client.update_item(
                 TableName=self.tables[RECORDS],
                 Key=serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
-                UpdateExpression="SET " + ", ".join(sets),
+                UpdateExpression="SET " + ", ".join(sets) + removes,
                 ConditionExpression=condition,
                 ExpressionAttributeNames=names,
                 ExpressionAttributeValues=serialize_values(values),
@@ -417,6 +445,21 @@ class DynamoStore:
             ExpressionAttributeValues=serialize_values({":o": "OPEN", ":t": older_than}),
         )
         return [deserialize_item(i) for i in resp.get("Items", [])]
+
+    def list_expired_leases(self, before: str) -> list[dict]:
+        """Runs, in any tenant, that are not finalized and whose lease ran out before `before`."""
+        out: list[dict] = []
+        kwargs: dict[str, Any] = dict(
+            TableName=self.tables[RECORDS], IndexName=LEASE_INDEX,
+            KeyConditionExpression="lease_flag = :l AND lease_until < :t",
+            ExpressionAttributeValues=serialize_values({":l": "LEASED", ":t": before}),
+        )
+        while True:
+            resp = self.client.query(**kwargs)
+            out.extend(deserialize_item(i) for i in resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                return out
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
     # -- domain writes -------------------------------------------------------
 

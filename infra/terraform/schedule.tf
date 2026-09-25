@@ -1,5 +1,5 @@
-# Step 15: list audit records stuck in a non-terminal state. The Lambda prints them; a CloudWatch metric
-# filter and alarm on that line is the next step.
+# Step 15: resume runs whose lease ran out, then list audit records stuck in a non-terminal state. The Lambda
+# prints both; a CloudWatch metric filter and alarm on that line is the next step.
 resource "aws_iam_role" "scheduler" {
   name = "${var.name}-scheduler"
   assume_role_policy = jsonencode({

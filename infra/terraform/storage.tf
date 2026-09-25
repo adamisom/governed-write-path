@@ -1,5 +1,5 @@
-# The system of record. Keys match gwp/store.py: pk and sk on both tables, and a sparse index on the
-# audit table for the staleness check.
+# The system of record. Keys match gwp/store.py: pk and sk on both tables, a sparse index on the records
+# table for runs that are not finalized, and a sparse index on the audit table for the staleness check.
 resource "aws_dynamodb_table" "records" {
   name                        = "${var.name}-records"
   billing_mode                = "PAY_PER_REQUEST"
@@ -14,6 +14,23 @@ resource "aws_dynamodb_table" "records" {
   attribute {
     name = "sk"
     type = "S"
+  }
+  attribute {
+    name = "lease_flag"
+    type = "S"
+  }
+  attribute {
+    name = "lease_until"
+    type = "S"
+  }
+
+  # A run carries lease_flag and lease_until until it is finalized. The scheduled sweep resumes a run whose
+  # lease ran out, e.g. because its worker hit the Lambda timeout after claiming it.
+  global_secondary_index {
+    name            = "leased_runs"
+    hash_key        = "lease_flag"
+    range_key       = "lease_until"
+    projection_type = "ALL"
   }
 
   point_in_time_recovery {
