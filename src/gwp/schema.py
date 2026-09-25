@@ -107,6 +107,8 @@ class RunOutcome(StrEnum):
     ROUTED_TO_HUMAN = "ROUTED_TO_HUMAN"
     NEEDS_HUMAN = "NEEDS_HUMAN"
     DUPLICATE_UPLOAD = "DUPLICATE_UPLOAD"
+    # Returned by `process` for a run another worker is processing. Never stored as a run's outcome.
+    IN_PROGRESS = "IN_PROGRESS"
 
 
 class RevertOutcome(StrEnum):

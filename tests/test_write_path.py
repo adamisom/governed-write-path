@@ -481,3 +481,114 @@ def test_resume_finishes_an_approved_write_whose_worker_died(store):
     assert orch.resume("T1", res.run_id).outcome == "APPLIED"
     assert orch.resume("T1", res.run_id).outcome == "APPLIED"
     assert len(store.list_payables("T1", "V-101")) == 2
+
+
+# -- exceptions after a commit, resume, and claiming a run (audit findings 4, 9, 14 and 19) -----------------
+
+
+def _post_and_hold(store, invoice_number):
+    doc = {**C01_DOC, "invoice_number": invoice_number}
+    orch, rm, pm = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(doc)}], [])
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    pm.turns.append({"tool": "propose_write", "input": {"proposals": [
+        c01_post(params={"invoice_number": invoice_number}),
+        {"action": "hold_invoice", "params": {"document_id": up.document_id, "reason_code": "check"},
+         "rationale": "h", "confidence": 0.9}]}})
+    return orch, up
+
+
+def test_an_exception_after_a_commit_is_reported_and_resume_finishes_the_set(store):
+    orch, up = _post_and_hold(store, "INV-EXC")
+    real_apply = orch.executor.apply
+    calls = []
+
+    def flaky(t, aid):
+        calls.append(aid)
+        if len(calls) == 2:
+            raise RuntimeError("dynamo hiccup on the second apply")
+        return real_apply(t, aid)
+
+    orch.executor.apply = flaky
+    res = orch.process("T1", up.run_id)
+    assert (res.outcome, res.reason) == ("NEEDS_HUMAN", "internal_error")
+    run = store.get_run("T1", up.run_id)
+    first, second = sorted(a["audit_id"] for a in store.list_audits("T1", up.run_id))
+    assert run["applied_audit_ids"] == [first]  # the run says a write exists
+    assert any(p["invoice_number"] == "INV-EXC" for p in store.list_payables("T1", "V-101"))
+    orch.executor.apply = real_apply
+    assert orch.resume("T1", up.run_id).outcome == "APPLIED"
+    assert store.get_audit("T1", second)["status"] == "applied"
+    assert store.get_run("T1", up.run_id)["applied_audit_ids"] == [first, second]
+    assert orch.resume("T1", up.run_id).outcome == "APPLIED"
+
+
+def test_resume_moves_an_approval_record_that_died_before_pending_approval(store):
+    doc = {**C01_DOC, "invoice_number": "INV-STK"}
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(doc)}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(requires_approval_reason="x", params={"invoice_number": "INV-STK"})]}}])
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+
+    class Die(BaseException):
+        pass
+
+    real = store.transition_audit
+    store.transition_audit = lambda *a, **k: (_ for _ in ()).throw(Die())
+    with pytest.raises(Die):
+        orch.process("T1", up.run_id)
+    store.transition_audit = real
+    assert orch.resume("T1", up.run_id).outcome == "PENDING_APPROVAL"
+    (audit,) = store.list_audits("T1", up.run_id)
+    assert audit["status"] == "pending_approval"
+    assert orch.approve("T1", audit["audit_id"], APPROVER, "approve").status == "applied"
+
+
+def test_resume_fails_a_set_that_was_never_fully_recorded(store):
+    orch, up = _post_and_hold(store, "INV-HALF")
+
+    class Die(BaseException):
+        pass
+
+    real = store.put_audit
+    seen = []
+
+    def die_on_second(audit):
+        seen.append(audit)
+        if len(seen) == 2:
+            raise Die()
+        real(audit)
+
+    store.put_audit = die_on_second
+    with pytest.raises(Die):
+        orch.process("T1", up.run_id)
+    store.put_audit = real
+    res = orch.resume("T1", up.run_id)
+    assert (res.outcome, res.reason) == ("NEEDS_HUMAN", "interrupted")
+    assert [a["status"] for a in store.list_audits("T1", up.run_id)] == ["failed"]
+    assert not any(p["invoice_number"] == "INV-HALF" for p in store.list_payables("T1", "V-101"))
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
+
+
+def test_a_second_worker_with_a_stale_view_cannot_claim_the_run(store):
+    ext = documents.faithful_extraction(C01_DOC)
+    orch, rm, pm = build(store, [{"tool": "Extraction", "input": ext}],
+                         [{"tool": "propose_write", "input": {"proposals": [c01_post()]}}])
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    stale = store.get_run("T1", up.run_id)  # read while the run was still "received"
+    assert orch.process("T1", up.run_id).outcome == "APPLIED"
+    real = store.get_run
+    store.get_run = lambda t, r: stale
+    try:
+        again = orch.process("T1", up.run_id)
+    finally:
+        store.get_run = real
+    assert again.outcome == "IN_PROGRESS"
+    assert rm.calls == 1 and pm.calls == 1  # the second worker called no model
+    assert len(store.list_audits("T1", up.run_id)) == 1
+
+
+def test_process_on_a_run_another_worker_holds_says_in_progress(store):
+    orch, _, _ = build(store, [], [])
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    store.update_run("T1", up.run_id, {"state": "text_extracted"})
+    assert orch.process("T1", up.run_id).outcome == "IN_PROGRESS"

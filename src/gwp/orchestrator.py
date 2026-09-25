@@ -5,8 +5,10 @@ write. Steps 3 (read) and 6 (propose) are the only model calls; everything else
 is here or in `policy` and `executor`.
 
 A failure fails closed: a model timeout, a throttle, an invalid output or an
-unexpected exception ends the run as NEEDS_HUMAN with no write, never as an
-auto-apply.
+unexpected exception ends the run as NEEDS_HUMAN, never as an auto-apply. An
+exception before step 12 leaves no write. An exception after one write of a set
+committed leaves that write in place, audited as applied, and the run lists it
+in `applied_audit_ids`; `resume` then finishes the rest of the set.
 
 This module imports no agent framework. It talks to the models only through the
 `Reader` and `Proposer` interfaces in `gwp.agents`.
@@ -165,15 +167,22 @@ class Orchestrator:
         run = self.store.get_run(tenant_id, run_id)
         if run is None:
             raise KeyError(run_id)
+        if run["state"] == "finalized":
+            return RunResult(run_id, run.get("outcome") or "", run.get("reason"), run.get("audit_ids", []))
         if run["state"] != "received":
-            return RunResult(run_id, run.get("outcome") or "", run.get("reason"))
+            # Another worker holds this run. Say so instead of returning an empty outcome.
+            return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
         t0 = self.clock.monotonic()
         trace: dict = {"model_calls": [], "retrieved": [], "searches": [], "proposal_attempts": []}
         try:
             return self._process(tenant_id, run, trace, t0)
         except Exception as exc:  # noqa: BLE001 - fail closed on any bug
+            # Say honestly what exists: an exception after a commit leaves that write applied and audited.
+            audits = self.store.list_audits(tenant_id, run_id)
+            applied = [a["audit_id"] for a in audits if a["status"] == "applied"]
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "internal_error", trace, t0,
-                                extra={"error": repr(exc)[:500]})
+                                [a["audit_id"] for a in audits],
+                                extra={"error": repr(exc)[:500], "applied_audit_ids": applied})
 
     def _process(self, tenant_id: str, run: dict, trace: dict, t0: float) -> RunResult:
         run_id = run["run_id"]
@@ -184,8 +193,12 @@ class Orchestrator:
 
         # Step 2: text extraction.
         text, pages = extract_text(self.blobs.get(doc["storage_key"]), doc["content_type"])
-        self.store.update_run(tenant_id, run_id, {"state": "text_extracted", "page_count": pages,
-                                                  "char_count": len(text)}, ("text_extracted", self.clock.now()))
+        # Claim the run with a conditional update, so two workers that both read "received" can't both go on.
+        claimed = self.store.update_run(tenant_id, run_id, {"state": "text_extracted", "page_count": pages,
+                                                            "char_count": len(text)},
+                                        ("text_extracted", self.clock.now()), expect_state="received")
+        if not claimed:
+            return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
 
         # Step 3: read, quarantined. One retry with backoff.
         extraction = None
@@ -277,6 +290,17 @@ class Orchestrator:
                                        route, reason)
             self.store.put_audit(audit)
             audit_ids.append(audit["audit_id"])
+        bank_followup = route == "auto" and VendorRequest.bank_details_change in extraction.vendor_requests
+        if bank_followup:
+            # The written policy sends any bank change request to a person. The agent can't act on it, and the
+            # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
+            self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
+                                       "reason_code": "vendor_requested_bank_change", "status": "open",
+                                       "created_at": self.clock.now()})
+        # The whole set is recorded. From here on, `resume` may finish it; before this, it may not.
+        self.store.update_run(tenant_id, run_id, {"state": "audited", "audit_ids": audit_ids,
+                                                  "audit_set_complete": True, "route": route,
+                                                  "route_reason": reason}, ("audited", self.clock.now()))
 
         # Step 10: route.
         now = self.clock.now()
@@ -298,12 +322,6 @@ class Orchestrator:
 
         # Step 12: execute the auto tier.
         results = [self.executor.apply(tenant_id, aid) for aid in audit_ids]
-        if VendorRequest.bank_details_change in extraction.vendor_requests:
-            # The written policy sends any bank change request to a person. The agent can't act on it, and the
-            # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
-            self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
-                                       "reason_code": "vendor_requested_bank_change", "status": "open",
-                                       "created_at": self.clock.now()})
         if all(r.status in ("applied", "already_applied") for r in results):
             return self._finish(tenant_id, run_id, RunOutcome.APPLIED, None, trace, t0, audit_ids, decision)
         errors = ",".join(r.error or r.status for r in results if r.status not in ("applied", "already_applied"))
@@ -460,42 +478,90 @@ class Orchestrator:
         if "extraction" in trace:
             fields["extraction"] = trace["extraction"]
             fields["extraction_flags"] = trace["extraction_flags"]
+        fields.setdefault("applied_audit_ids", [])
         fields.update(extra or {})
+        if audit_ids and "applied_audit_ids" not in (extra or {}):
+            fields["applied_audit_ids"] = [a["audit_id"] for a in self.store.list_audits(tenant_id, run_id)
+                                           if a["status"] == "applied"]
         self.store.update_run(tenant_id, run_id, fields, (f"finalized:{outcome}", fields["ended_at"]))
         return RunResult(run_id, outcome, reason, audit_ids or [])
 
     def resume(self, tenant_id: str, run_id: str) -> RunResult:
-        """Redeliver a run whose worker died after step 9: re-run execution for its audit records and finalize.
+        """Redeliver a run whose worker died or raised: finish what its audit records say is left, then finalize.
 
-        Safe to call any number of times. Execution keys make a repeated apply a no-op.
+        Safe to call any number of times. Execution keys make a repeated apply a no-op, and every status change
+        is a compare-and-set.
+
+        - If the worker died before the whole proposal set was recorded (step 9), no part of the set may apply:
+          the records are marked failed and a person decides.
+        - Otherwise each record is finished by its tier: an auto record still at `proposed` is applied, an
+          approval record still at `proposed` moves to `pending_approval`, a routed or forbidden record still at
+          `proposed` is closed and a person gets a task, and an `approved` record is applied. This holds whether
+          or not the run was finalized, e.g. by the fail-closed handler after one write of a set committed.
         """
         run = self.store.get_run(tenant_id, run_id)
         if run is None:
             raise KeyError(run_id)
         audits = self.store.list_audits(tenant_id, run_id)
-        if run.get("state") == "finalized":
-            # A worker can also die while applying an approved write. Finish those, then refresh the outcome.
-            for a in audits:
-                if a["status"] == "approved":
-                    self.executor.apply(tenant_id, a["audit_id"])
-            outcome = self._refresh_run_outcome(tenant_id, run_id) or run["outcome"]
-            return RunResult(run_id, outcome, run.get("reason"), run.get("audit_ids", []))
+        finalized = run.get("state") == "finalized"
+        now = self.clock.now()
         if not audits:
+            if finalized:
+                return RunResult(run_id, run["outcome"], run.get("reason"), [])
             # Died before any audit record existed, so nothing was proposed or written. A person decides.
             self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
-                                                      "reason": "interrupted"}, ("finalized_on_resume", self.clock.now()))
+                                                      "reason": "interrupted"}, ("finalized_on_resume", now))
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted")
+        audit_ids = [a["audit_id"] for a in audits]
+        if not run.get("audit_set_complete"):
+            for a in audits:
+                self.store.transition_audit(tenant_id, a["audit_id"], [AuditStatus.proposed], AuditStatus.failed,
+                                            now, {"error": "audit_set_incomplete"}, terminal=True)
+            self._ensure_task(tenant_id, run_id, "interrupted")
+            self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
+                                                      "reason": "interrupted", "audit_ids": audit_ids},
+                                  ("finalized_on_resume", now))
+            return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted", audit_ids)
+
+        routed = False
         for a in audits:
-            if a["status"] == "proposed" and a["tier"] == Tier.auto:
+            status, tier = a["status"], a["tier"]
+            if status == AuditStatus.approved or (status == AuditStatus.proposed and tier == Tier.auto):
                 self.executor.apply(tenant_id, a["audit_id"])
-        outcome = self._refresh_run_outcome(tenant_id, run_id) or RunOutcome.NEEDS_HUMAN
-        calls = audits[0].get("model_calls", [])  # the audit record kept the model calls the dead worker made
-        cost = round(sum(c["cost_usd"] for c in calls if c.get("cost_usd") is not None), 8)
-        self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": outcome, "model_calls": calls,
-                                                  "cost_usd": cost, "retrieved": audits[0].get("retrieved", []),
-                                                  "audit_ids": [a["audit_id"] for a in audits]},
-                              ("finalized_on_resume", self.clock.now()))
-        return RunResult(run_id, outcome, None, [a["audit_id"] for a in audits])
+            elif status == AuditStatus.proposed and tier == Tier.approval:
+                self.store.transition_audit(tenant_id, a["audit_id"], [AuditStatus.proposed],
+                                            AuditStatus.pending_approval, now)
+            elif status == AuditStatus.proposed:
+                to = AuditStatus.rejected if (tier == Tier.forbidden or a["action"] in FORBIDDEN_ACTIONS) \
+                    else AuditStatus.routed
+                self.store.transition_audit(tenant_id, a["audit_id"], [AuditStatus.proposed], to, now,
+                                            {"decided_by": "system", "decided_at": now,
+                                             "route_reason": run.get("route_reason")}, terminal=True)
+                routed = True
+        if routed:
+            self._ensure_task(tenant_id, run_id, run.get("route_reason") or "interrupted")
+
+        if run.get("route") == "human":
+            # A run routed to a person stays routed; no write in it applies.
+            outcome = RunOutcome.ROUTED_TO_HUMAN
+            self.store.update_run(tenant_id, run_id, {"outcome": outcome}, (f"outcome:{outcome}", now))
+        else:
+            outcome = self._refresh_run_outcome(tenant_id, run_id) or RunOutcome.NEEDS_HUMAN
+        if not finalized:
+            calls = audits[0].get("model_calls", [])  # the audit record kept the model calls the dead worker made
+            cost = round(sum(c["cost_usd"] for c in calls if c.get("cost_usd") is not None), 8)
+            self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": outcome, "model_calls": calls,
+                                                      "cost_usd": cost, "retrieved": audits[0].get("retrieved", []),
+                                                      "reason": run.get("route_reason"), "audit_ids": audit_ids},
+                                  ("finalized_on_resume", now))
+            return RunResult(run_id, outcome, run.get("route_reason"), audit_ids)
+        return RunResult(run_id, outcome, run.get("reason"), audit_ids)
+
+    def _ensure_task(self, tenant_id: str, run_id: str, reason: str) -> None:
+        if any(t["run_id"] == run_id for t in self.store.list_human_tasks(tenant_id)):
+            return
+        self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
+                                   "reason_code": reason, "status": "open", "created_at": self.clock.now()})
 
     # -- step 11: approve -------------------------------------------------------------------
 
@@ -537,7 +603,11 @@ class Orchestrator:
             outcome = RunOutcome.DECLINED
         else:
             outcome = RunOutcome.NEEDS_HUMAN
-        self.store.update_run(tenant_id, run_id, {"outcome": outcome}, (f"outcome:{outcome}", self.clock.now()))
+        # A set can end mixed, e.g. one write applied and another declined. The outcome names the part that needs
+        # attention, and the run always lists what did apply.
+        applied = [a["audit_id"] for a in audits if a["status"] == "applied"]
+        self.store.update_run(tenant_id, run_id, {"outcome": outcome, "applied_audit_ids": applied},
+                              (f"outcome:{outcome}", self.clock.now()))
         return outcome
 
     def approval_view(self, tenant_id: str, audit_id: str) -> dict:

@@ -318,9 +318,16 @@ class DynamoStore:
     def list_runs(self, tenant_id: str) -> list[dict]:
         return self._query(RECORDS, tenant_pk(tenant_id), "RUN#")
 
-    def update_run(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None = None) -> None:
+    def update_run(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None = None,
+                   expect_state: str | None = None) -> bool:
+        """Set fields on a run. With `expect_state`, only if the run is still in that state; returns False if not."""
         names: dict[str, str] = {}
         values: dict[str, Any] = {}
+        condition = "attribute_exists(pk)"
+        if expect_state is not None:
+            names["#state"] = "state"
+            values[":expect_state"] = expect_state
+            condition += " AND #state = :expect_state"
         sets = []
         for i, (k, v) in enumerate(fields.items()):
             names[f"#f{i}"] = k
@@ -331,14 +338,20 @@ class DynamoStore:
             values[":h"] = [{"state": history[0], "at": history[1]}]
             values[":empty"] = []
             sets.append("#h = list_append(if_not_exists(#h, :empty), :h)")
-        self.client.update_item(
-            TableName=self.tables[RECORDS],
-            Key=serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
-            UpdateExpression="SET " + ", ".join(sets),
-            ConditionExpression="attribute_exists(pk)",
-            ExpressionAttributeNames=names,
-            ExpressionAttributeValues=serialize_values(values),
-        )
+        try:
+            self.client.update_item(
+                TableName=self.tables[RECORDS],
+                Key=serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
+                UpdateExpression="SET " + ", ".join(sets),
+                ConditionExpression=condition,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=serialize_values(values),
+            )
+        except ClientError as e:
+            if expect_state is not None and e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
 
     def put_human_task(self, task: dict) -> None:
         item = {"pk": tenant_pk(task["tenant_id"]), "sk": f"TASK#{task['task_id']}", "kind": "human_task", **task}
