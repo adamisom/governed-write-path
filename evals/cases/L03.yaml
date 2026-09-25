@@ -26,7 +26,7 @@ expect:
   min_latency_ms: 2000
   audits: [[post_payable, auto, applied]]
   payables_added:
-    - {vendor_id: V-101, invoice_number: INV-6001, po_id: PO-7001, total_cents: 84250,
+    - {vendor_id: V-101, invoice_number: INV-6001, invoice_date: "2026-08-03", po_id: PO-7001, total_cents: 84250,
        lines: [[item, "6100", 65000], [item, "6100", 19250]]}
   ledger_entries_added: 1
   ledger_net: {"6100": 84250, "2000": -84250}

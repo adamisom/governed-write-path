@@ -54,7 +54,7 @@ expect:
   trail: ["process:APPLIED"]
   audits: [[post_payable, auto, applied]]
   payables_added:
-    - {vendor_id: V-101, invoice_number: INV-6004, po_id: PO-7012, total_cents: 190400,
+    - {vendor_id: V-101, invoice_number: INV-6004, invoice_date: "2026-08-06", po_id: PO-7012, total_cents: 190400,
        lines: [[item, "6100", 32500], [item, "6100", 18000], [item, "6100", 9600], [item, "6100", 15400],
                [item, "6100", 8800], [item, "6100", 8800], [item, "6100", 8800], [item, "6100", 18500],
                [item, "6100", 17600], [item, "6100", 17400], [item, "6100", 12300], [item, "6100", 22700]]}

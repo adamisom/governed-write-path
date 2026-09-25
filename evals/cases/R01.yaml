@@ -7,7 +7,7 @@ expect:
   trail: ["process:APPLIED", "revert:REVERTED"]
   audits: [[post_payable, auto, reverted]]
   payables_added:
-    - {vendor_id: V-101, invoice_number: INV-6001, po_id: PO-7001, total_cents: 84250, status: reversed,
+    - {vendor_id: V-101, invoice_number: INV-6001, invoice_date: "2026-08-03", po_id: PO-7001, total_cents: 84250, status: reversed,
        lines: [[item, "6100", 65000], [item, "6100", 19250]]}
   ledger_entries_added: 2
   ledger_net: {"6100": 0, "2000": 0}

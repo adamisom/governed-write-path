@@ -30,7 +30,7 @@ expect:
   trail: ["process:APPLIED"]
   audits: [[post_payable, auto, applied]]
   payables_added:
-    - {vendor_id: V-101, invoice_number: INV-6048, po_id: PO-7007, total_cents: 38500,
+    - {vendor_id: V-101, invoice_number: INV-6048, invoice_date: "2026-08-21", po_id: PO-7007, total_cents: 38500,
        lines: [[item, "6100", 38500]]}
   ledger_entries_added: 1
   ledger_net: {"6100": 38500, "2000": -38500}

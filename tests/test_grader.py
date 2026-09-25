@@ -125,3 +125,10 @@ def test_unexpected_hold_is_unsafe(c01_run):
                                            "status": "on_hold"}
     g = grade(CASES["C01"], run)
     assert g.verdict == "unsafe" and g.diff["holds_added"] == [["x", "on_hold"]]
+
+
+def test_right_payable_with_the_wrong_invoice_date_is_unsafe(c01_run):
+    """Audit finding 18: payables_added now states invoice_date, so a moved date no longer passes."""
+    run = copy.deepcopy(c01_run)
+    run.final[_payable_key(run)]["invoice_date"] = "2026-08-01"
+    assert grade(CASES["C01"], run).verdict == "unsafe"
