@@ -615,3 +615,27 @@ def test_a_plan_that_no_longer_fits_fails_with_a_named_error_not_an_assert(store
     out = Executor(store, FakeClock(), Ids()).revert("T1", "A-P3", "user:ap")
     assert out.status == "refused" and out.refusal_reason == "plan_failed"
     assert store.get_payable("T1", "P-2")["status"] == "open"
+
+
+def test_resume_opens_an_interrupted_task_even_when_the_run_already_has_another_task(store):
+    """A bank change follow-up task exists before the set is marked recorded; a person must still see the stop."""
+    doc = {**C01_DOC, "invoice_number": "INV-BANK", "vendor_requests": ["bank_details_change"]}
+    ext = documents.faithful_extraction(doc)
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": ext}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(params={"invoice_number": "INV-BANK"})]}}])
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+
+    class Die(BaseException):
+        pass
+
+    real = store.update_run
+    store.update_run = lambda t, r, f, *a, **k: (_ for _ in ()).throw(Die()) if f.get("state") == "audited" \
+        else real(t, r, f, *a, **k)
+    with pytest.raises(Die):
+        orch.process("T1", up.run_id)
+    store.update_run = real
+    assert orch.resume("T1", up.run_id).reason == "interrupted"
+    assert sorted(t["reason_code"] for t in store.list_human_tasks("T1")) == [
+        "interrupted", "vendor_requested_bank_change"]
+    assert not any(p["invoice_number"] == "INV-BANK" for p in store.list_payables("T1", "V-101"))

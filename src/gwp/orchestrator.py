@@ -575,7 +575,7 @@ class Orchestrator:
         return RunResult(run_id, outcome, run.get("reason"), audit_ids)
 
     def _ensure_task(self, tenant_id: str, run_id: str, reason: str) -> None:
-        if any(t["run_id"] == run_id for t in self.store.list_human_tasks(tenant_id)):
+        if any(t["run_id"] == run_id and t["reason_code"] == reason for t in self.store.list_human_tasks(tenant_id)):
             return
         self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
                                    "reason_code": reason, "status": "open", "created_at": self.clock.now()})
