@@ -34,6 +34,7 @@ Source: build.
 - **Choice.** A `records` table holds everything a tenant owns, under `pk = TENANT#<id>`, including idempotency key items. An `audit` table holds one record per proposed write. The audit table has a global secondary index on `open_flag` and `open_since`, and those two attributes exist only while a record is in a non-terminal state, so the index lists exactly the records the staleness check wants.
 - **Alternative.** A separate proposals table, or a scan for the staleness check.
 - **Why.** The audit record already holds the proposal, so a proposals table would duplicate it. A sparse index keeps the staleness query cheap. A transaction can span both tables.
+- **Later.** The records table gained a second sparse index, `leased_runs`, for runs that are not finalized (entry 41).
 
 ## 4. The audit record is written before the change and finalized in the same transaction
 
@@ -205,7 +206,7 @@ Source: build. Changed after the audit, see entry 36.
 
 Source: research.
 
-- **Choice.** Terraform for an HTTP API with five routes and a throttle of 1 request a second (burst 5), one arm64 Python Lambda with reserved concurrency 2, the two tables with point-in-time recovery and deletion protection, a private S3 bucket for documents, an EventBridge Scheduler rule for the staleness check every 15 minutes, and a monthly budget alarm. The Lambda role has no `DeleteItem` on either table. None of it has been applied, and Terraform is not installed here, so `terraform validate` has never run.
+- **Choice.** Terraform for an HTTP API with five routes and a throttle of 1 request a second (burst 5), one arm64 Python Lambda with reserved concurrency 2, the two tables with point-in-time recovery and deletion protection, a private S3 bucket for documents, an EventBridge Scheduler rule for the staleness check every 15 minutes (which also resumes stranded runs, entry 41), and a monthly budget alarm. The Lambda role has no `DeleteItem` on either table, and has only item actions for transactions (entry 40). None of it has been applied, and Terraform is not installed here, so `terraform validate` has never run.
 - **Alternatives.** Step Functions with a task token for the approval wait, or Lambda durable functions. Both add a second place where state lives, and the approval in this design is already a conditional update in DynamoDB.
 - **Changed after the audit.** `POST /documents` no longer processes the document inside the request. Entry 35 has the reason.
 - **Difference from the research.** The research suggested applying approved writes from a DynamoDB Streams trigger. In v0 the approval request applies the write in the same Lambda call, which keeps one code path for auto and approved writes. A Streams consumer can call the same `Executor.apply`, since it is idempotent.
@@ -276,6 +277,7 @@ Source: changed after the audit (finding 4, and lows 9, 14 and 19).
 - **Before.** If one auto write of a set committed and the next apply raised, the run said `NEEDS_HUMAN` with no write listed, and `resume` left the second record at `proposed` for good, with the run showing `PENDING_APPROVAL`. An approval record whose worker died before `pending_approval` could never be approved.
 - **Choice.** The fail-closed handler lists `applied_audit_ids` on the run, and every finalized run lists them. After step 9 the run is marked `audit_set_complete` with its route. `resume` then finishes each record by its tier, on a finalized run or not: it applies auto records at `proposed` and approved records, moves approval records at `proposed` to `pending_approval`, and closes routed or forbidden records and opens a task. If the worker died before the whole set was recorded, no part of it may apply, so `resume` marks those records failed and a person gets a task.
 - **Claiming a run.** `process` claims the run with a conditional update from `received`, so two workers that both read `received` can't both call the models. A call on a run another worker holds returns `IN_PROGRESS`, never stored as an outcome.
+- **Gap found later.** Nothing called `resume` on its own, and a worker killed after the claim and before step 9 left no audit record for the staleness check to find. Entry 41 adds a lease and a sweep.
 - **Left as is.** A set that ends with one write applied and one declined still reports `DECLINED`. The applied write is listed on the run.
 
 ## 34. Recode and hold have eval cases, and the grader diffs holds and invoice dates
@@ -290,7 +292,7 @@ Source: build, after the audit (findings 10 and 18).
 Source: changed after the audit (finding 7).
 
 - **Before.** The request uploaded and processed the document in one call. An HTTP API integration times out at about 30 seconds, and the model budgets alone are 30 and 60 seconds with a retry each, so a slow document would return a gateway error while the Lambda kept running and might apply the write.
-- **Choice.** The request stores the document, creates the run, invokes the same function asynchronously with a `gwp.process` event, and returns 202 with the run id. The client polls `GET /runs/{id}`, which now also lists the applied writes. Terraform lets the function invoke only itself and allows one async retry, which is safe because of the conditional claim in entry 33. The 30-second limit is from the audit and should be checked before deploying.
+- **Choice.** The request stores the document, creates the run, invokes the same function asynchronously with a `gwp.process` event, and returns 202 with the run id. The client polls `GET /runs/{id}`, which now also lists the applied writes. Terraform lets the function invoke only itself and allows one async retry, which is safe because of the conditional claim in entry 33. A retry that finds a claimed run does nothing unless the run's lease has run out (entry 41). The 30-second limit is from the audit and should be checked before deploying.
 
 ## 36. The live spend estimate comes from the research, and the cap is required
 
