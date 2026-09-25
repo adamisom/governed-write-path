@@ -215,6 +215,7 @@ Source: spec, with details from the build.
 - **Choice.** Any exception inside `process` ends the run as `NEEDS_HUMAN` with reason `internal_error` and no write. The executor fails a write whose plan no longer fits the records instead of raising. The crash in case D04 is a `BaseException`, so it escapes the fail-closed handler the way a dead process would, and `resume` finishes the run.
 - **Bug found.** The first run of case C02 ended in `NEEDS_HUMAN` with a `KeyError`. The store drops `None` values before writing to DynamoDB, so the open-ended contract price row lost its `effective_to` key. The fix reads it with `.get`. The fail-closed handler did its job, and the eval caught the bug on its first run.
 - **Bug found in review.** Approving a write whose line named a purchase order line that doesn't exist raised a `KeyError` out of `approve`. The executor now marks that write `failed` with the reason.
+- **Bug found in review.** If a worker died after an approval but before the apply, `resume` returned early because the run was already finalized, so the run stayed at `PENDING_APPROVAL`. `resume` now finishes any approved write and refreshes the outcome.
 
 ## 27. Approval precision and recall use the approval tier only
 

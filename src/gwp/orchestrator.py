@@ -472,9 +472,14 @@ class Orchestrator:
         run = self.store.get_run(tenant_id, run_id)
         if run is None:
             raise KeyError(run_id)
-        if run.get("state") == "finalized":
-            return RunResult(run_id, run["outcome"], run.get("reason"), run.get("audit_ids", []))
         audits = self.store.list_audits(tenant_id, run_id)
+        if run.get("state") == "finalized":
+            # A worker can also die while applying an approved write. Finish those, then refresh the outcome.
+            for a in audits:
+                if a["status"] == "approved":
+                    self.executor.apply(tenant_id, a["audit_id"])
+            outcome = self._refresh_run_outcome(tenant_id, run_id) or run["outcome"]
+            return RunResult(run_id, outcome, run.get("reason"), run.get("audit_ids", []))
         if not audits:
             # Died before any audit record existed, so nothing was proposed or written. A person decides.
             self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,

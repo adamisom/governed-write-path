@@ -308,3 +308,20 @@ def test_approving_a_proposal_that_no_longer_fits_the_records_fails_cleanly(stor
     audit = store.get_audit("T1", aid)
     assert audit["status"] == "failed" and audit["error"].startswith("plan_failed")
     assert len(store.list_payables("T1", "V-101")) == 1
+
+
+def test_resume_finishes_an_approved_write_whose_worker_died(store):
+    """Found in review: a crash between approval and apply left the run at PENDING_APPROVAL for good."""
+    from gwp.executor import SimulatedCrash
+
+    orch, res, _, _ = run_doc(store, C01_DOC, [c01_post(requires_approval_reason="x")])
+    aid = res.audit_ids[0]
+    real_apply = orch.executor.apply
+    orch.executor.apply = lambda t, a: (_ for _ in ()).throw(SimulatedCrash(a))
+    with pytest.raises(SimulatedCrash):
+        orch.approve("T1", aid, APPROVER, "approve")
+    orch.executor.apply = real_apply
+    assert store.get_audit("T1", aid)["status"] == "approved"
+    assert orch.resume("T1", res.run_id).outcome == "APPLIED"
+    assert orch.resume("T1", res.run_id).outcome == "APPLIED"
+    assert len(store.list_payables("T1", "V-101")) == 2
