@@ -14,7 +14,7 @@ from pathlib import Path
 
 import boto3
 import pytest
-from helpers import C01_DOC, build, c01_post
+from helpers import C01_DOC, UPLOADER, build, c01_post
 
 from gwp import api
 from gwp.evals.cases import load_cases
@@ -121,7 +121,12 @@ def _api_flow(monkeypatch):
             (item,) = json.loads(api.handler(ev("GET", "/approvals", "ap"))["body"])
             api.handler(ev("POST", f"/approvals/{item['audit_id']}", "ap", json.dumps({"decision": "approve"})))
             api.handler(ev("POST", f"/reverts/{item['audit_id']}", "ap"))
+            # A run whose processing event never arrived: the sweep finalizes it and opens its task in one
+            # transaction (Codex round 3).
+            stranded = o.upload("T1", render({**C01_DOC, "invoice_number": "INV-IAM"}), "application/pdf", UPLOADER)
+            store.update_run("T1", stranded.run_id, {"lease_until": "2000-01-01T00:00:00Z"})
             api.handler({"source": "gwp.staleness"})
+            assert [t["run_id"] for t in store.list_human_tasks("T1")] == [stranded.run_id]
             o.resume("T1", run_id)
             return store.tables
         finally:
