@@ -306,9 +306,7 @@ class Orchestrator:
         if bank_followup:
             # The written policy sends any bank change request to a person. The agent can't act on it, and the
             # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
-            self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
-                                       "reason_code": "vendor_requested_bank_change", "status": "open",
-                                       "created_at": self.clock.now()})
+            self._open_task(tenant_id, run_id, "vendor_requested_bank_change")
         # The whole set is recorded. From here on, `resume` may finish it; before this, it may not.
         self.store.update_run(tenant_id, run_id, {"state": "audited", "audit_ids": audit_ids,
                                                   "audit_set_complete": True, "route": route,
@@ -322,8 +320,7 @@ class Orchestrator:
                 self.store.transition_audit(tenant_id, aid, ["proposed"], status, now,
                                             {"decided_by": "system", "decided_at": now, "route_reason": reason},
                                             terminal=True)
-            self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
-                                       "reason_code": reason, "status": "open", "created_at": now})
+            self._open_task(tenant_id, run_id, reason)
             return self._finish(tenant_id, run_id, RunOutcome.ROUTED_TO_HUMAN, reason, trace, t0, audit_ids,
                                 decision)
         if route == "approval":
@@ -527,6 +524,8 @@ class Orchestrator:
           approval record still at `proposed` moves to `pending_approval`, a routed or forbidden record still at
           `proposed` is closed and a person gets a task, and an `approved` record is applied. This holds whether
           or not the run was finalized, e.g. by the fail-closed handler after one write of a set committed.
+        - A run routed to a person always gets its task, even if its records were closed before the worker died.
+          A task is opened at most once per run and reason, so two sweeps that resume the same run open one.
         """
         run = self.store.get_run(tenant_id, run_id)
         if run is None:
@@ -543,14 +542,14 @@ class Orchestrator:
                                                              "reason": "interrupted"}, ("finalized_on_resume", now),
                                          expect_state=run["state"]):
                 return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
-            self._ensure_task(tenant_id, run_id, "interrupted")
+            self._open_task(tenant_id, run_id, "interrupted")
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted")
         audit_ids = [a["audit_id"] for a in audits]
         if not run.get("audit_set_complete"):
             for a in audits:
                 self.store.transition_audit(tenant_id, a["audit_id"], [AuditStatus.proposed], AuditStatus.failed,
                                             now, {"error": "audit_set_incomplete"}, terminal=True)
-            self._ensure_task(tenant_id, run_id, "interrupted")
+            self._open_task(tenant_id, run_id, "interrupted")
             self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
                                                       "reason": "interrupted", "audit_ids": audit_ids},
                                   ("finalized_on_resume", now))
@@ -571,8 +570,9 @@ class Orchestrator:
                                             {"decided_by": "system", "decided_at": now,
                                              "route_reason": run.get("route_reason")}, terminal=True)
                 routed = True
-        if routed:
-            self._ensure_task(tenant_id, run_id, run.get("route_reason") or "interrupted")
+        if routed or run.get("route") == "human":
+            # Also when the records were already closed: the worker may have died before it opened the task.
+            self._open_task(tenant_id, run_id, run.get("route_reason") or "interrupted")
 
         if run.get("route") == "human":
             # A run routed to a person stays routed; no write in it applies.
@@ -590,11 +590,10 @@ class Orchestrator:
             return RunResult(run_id, outcome, run.get("route_reason"), audit_ids)
         return RunResult(run_id, outcome, run.get("reason"), audit_ids)
 
-    def _ensure_task(self, tenant_id: str, run_id: str, reason: str) -> None:
-        if any(t["run_id"] == run_id and t["reason_code"] == reason for t in self.store.list_human_tasks(tenant_id)):
-            return
-        self.store.put_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
-                                   "reason_code": reason, "status": "open", "created_at": self.clock.now()})
+    def _open_task(self, tenant_id: str, run_id: str, reason: str) -> None:
+        """Open a task for a person, once per run and reason, however many workers or sweeps get here."""
+        self.store.open_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
+                                    "reason_code": reason, "status": "open", "created_at": self.clock.now()})
 
     # -- step 11: approve -------------------------------------------------------------------
 

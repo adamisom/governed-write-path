@@ -382,10 +382,22 @@ class DynamoStore:
             raise
         return True
 
-    def put_human_task(self, task: dict) -> None:
-        item = {"pk": tenant_pk(task["tenant_id"]), "sk": f"TASK#{task['task_id']}", "kind": "human_task", **task}
-        self.client.put_item(TableName=self.tables[RECORDS], Item=serialize_item(item),
-                             ConditionExpression="attribute_not_exists(pk)")
+    def open_human_task(self, task: dict) -> bool:
+        """Open a task for a person, at most one per run and reason. Return False if that task already exists.
+
+        The item key is the run and the reason, not the task id, so two workers that both decide a run needs the
+        same task can't open two: the second conditional put fails.
+        """
+        item = {"pk": tenant_pk(task["tenant_id"]), "sk": f"TASK#{task['run_id']}#{task['reason_code']}",
+                "kind": "human_task", **task}
+        try:
+            self.client.put_item(TableName=self.tables[RECORDS], Item=serialize_item(item),
+                                 ConditionExpression="attribute_not_exists(pk)")
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
 
     def list_human_tasks(self, tenant_id: str) -> list[dict]:
         return self._query(RECORDS, tenant_pk(tenant_id), "TASK#")

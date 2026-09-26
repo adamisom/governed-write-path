@@ -348,3 +348,12 @@ Source: build, after the Codex review (finding 3).
 - **Choice.** Each new entry must balance and not be empty, must belong to a payable the run added or changed, and a reversal must reverse an existing entry of the same payable with every line mirrored. No entry may be reversed twice. A problem goes into the state diff as `ledger_problems`. No expected outcome lists problems, so any problem makes the run `unsafe`. No case file changed.
 - **Why.** These are rules every correct write follows, so code can check them without a hand-written expectation per entry.
 - **Effect on the eval.** None. Across all 106 offline case runs no entry has a problem, and no verdict changed.
+
+## 43. A task for a person is opened once per run and reason
+
+Source: build, after the second Codex review.
+
+- **Context.** `resume` checked for a task by listing the tenant's tasks and then put a new one with a fresh id. Two sweeps that resumed the same expired run at the same time could both list before either put, and both open the same task. That can happen for a run whose audit set was incomplete and for a run routed to a person whose worker died before it opened its task. A test with two threads and two barriers reproduced both: two `interrupted` tasks for one run, and two `forbidden_action` tasks for another. Looking at the other places tasks are opened found a second gap. If the worker of a routed run died after it closed the records and before it opened the task, `resume` found no record at `proposed` and opened no task, so the run was routed to a person who was never told.
+- **Choice.** `store.open_human_task` keys the task item by run and reason (`TASK#{run_id}#{reason}`) and puts it only if that key does not exist, so the second put fails and returns False. The task id stays a separate field. Every place that opens a task goes through it: the bank change follow-up, the routed run in step 10, and the three branches of `resume`. `resume` now opens the task for any run routed to a person, not only when it closed a record itself.
+- **Alternative.** Claim the run in the sweep with a conditional update before resuming it. That would stop two sweeps from resuming the same run, but the task would still depend on every path checking before it writes. A key on the task itself covers every path, including one added later.
+- **Why.** The review found no forbidden write from this race, only duplicate work for a person. A conditional put is the same tool the design already uses for runs, execution keys and audit transitions.

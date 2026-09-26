@@ -728,3 +728,135 @@ def test_a_run_whose_processing_event_never_arrived_is_found_by_the_sweep(store)
     assert rm.calls == 0
     # If the event does arrive late, it finds the run finished and calls no model.
     assert orch.process("T1", up.run_id).outcome == "NEEDS_HUMAN" and rm.calls == 0
+
+
+# -- two sweeps over the same run (Codex round 2) ------------------------------------------------------------
+
+
+def _two_sweeps(orch, store):
+    """Run two sweeps at once over the same expired run, in the order the round 2 review describes.
+
+    Both sweeps read the run's audit records before either changes them, and both decide to open a task before
+    either has opened it. Two barriers pin that order: one after each sweep's first read of the audit records, one
+    at the task id, which the orchestrator takes right before it opens a task.
+    """
+    import threading
+
+    after_read, before_open = threading.Barrier(2, timeout=10), threading.Barrier(2, timeout=10)
+    local = threading.local()
+    real_list, real_new = store.list_audits, orch.ids.new
+
+    def list_audits(*a, **k):
+        out = real_list(*a, **k)
+        if not getattr(local, "read", False):
+            local.read = True
+            after_read.wait()
+        return out
+
+    def new(prefix):
+        if prefix == "H" and not getattr(local, "opening", False):
+            local.opening = True
+            before_open.wait()
+        return real_new(prefix)
+
+    results, errors = [None, None], []
+
+    def sweep(i):
+        try:
+            results[i] = orch.recover_stranded()
+        except BaseException as e:  # noqa: BLE001 - reported below
+            errors.append(e)
+
+    store.list_audits, orch.ids.new = list_audits, new
+    threads = [threading.Thread(target=sweep, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    del store.list_audits, orch.ids.new
+    assert not errors, errors
+    assert [len(r) for r in results] == [1, 1], "both sweeps must have resumed the same run"
+    return results[0] + results[1]
+
+
+def test_two_sweeps_over_a_run_with_an_incomplete_audit_set_open_one_task(store):
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    clock = FakeClock()
+    doc = {**C01_DOC, "invoice_number": "INV-TWICE"}
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(doc)}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(params={"invoice_number": "INV-TWICE"})]}}], clock=clock)
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    real = store.update_run
+    store.update_run = lambda t, r, f, *a, **k: (_ for _ in ()).throw(_Die()) if f.get("state") == "audited" \
+        else real(t, r, f, *a, **k)
+    with pytest.raises(_Die):
+        orch.process("T1", up.run_id)
+    store.update_run = real
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    found = _two_sweeps(orch, store)
+    assert [f["outcome"] for f in found] == ["NEEDS_HUMAN", "NEEDS_HUMAN"]
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
+    assert [a["status"] for a in store.list_audits("T1", up.run_id)] == ["failed"]
+
+
+def _forbidden_run_that_dies(store, clock, die_on):
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(C01_DOC)}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(), {"action": "schedule_payment", "params": {"payable_id": "x"}}]}}], clock=clock)
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    die_on(orch)
+    with pytest.raises(_Die):
+        orch.process("T1", up.run_id)
+    return orch, up
+
+
+def test_two_sweeps_over_a_routed_run_whose_worker_died_before_its_task_open_one_task(store):
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    clock = FakeClock()
+    real = store.transition_audit
+
+    def die_on(orch):
+        store.transition_audit = lambda *a, **k: (_ for _ in ()).throw(_Die())
+
+    orch, up = _forbidden_run_that_dies(store, clock, die_on)
+    store.transition_audit = real
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    found = _two_sweeps(orch, store)
+    assert [f["outcome"] for f in found] == ["ROUTED_TO_HUMAN", "ROUTED_TO_HUMAN"]
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["forbidden_action"]
+    assert store.list_payables("T1", "V-101")[0]["payable_id"] == "P-2"
+
+
+def test_a_routed_run_whose_worker_died_just_before_its_task_still_gets_one(store):
+    """The records were already closed as routed, so resume found nothing at `proposed` and opened no task."""
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    clock = FakeClock()
+
+    def die_on(orch):
+        real = orch.ids.new
+        orch.ids.new = lambda p: (_ for _ in ()).throw(_Die()) if p == "H" else real(p)
+
+    orch, up = _forbidden_run_that_dies(store, clock, die_on)
+    del orch.ids.new  # back to the class method
+    assert sorted(a["status"] for a in store.list_audits("T1", up.run_id)) == ["rejected", "routed"]
+    assert store.list_human_tasks("T1") == []
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    (found,) = orch.recover_stranded()
+    assert found["outcome"] == "ROUTED_TO_HUMAN"
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["forbidden_action"]
+    assert orch.resume("T1", up.run_id).outcome == "ROUTED_TO_HUMAN"
+    assert len(store.list_human_tasks("T1")) == 1
+
+
+def test_opening_the_same_task_twice_keeps_one(store):
+    task = {"tenant_id": "T1", "task_id": "H-1", "run_id": "R-1", "reason_code": "interrupted", "status": "open",
+            "created_at": "2026-09-25T00:00:00Z"}
+    assert store.open_human_task(task) is True
+    assert store.open_human_task({**task, "task_id": "H-2"}) is False
+    assert store.open_human_task({**task, "task_id": "H-3", "reason_code": "unknown_vendor"}) is True
+    assert sorted((t["task_id"], t["reason_code"]) for t in store.list_human_tasks("T1")) == [
+        ("H-1", "interrupted"), ("H-3", "unknown_vendor")]
