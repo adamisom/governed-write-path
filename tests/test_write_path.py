@@ -962,3 +962,40 @@ def test_finalize_with_task_keeps_one_task_and_respects_the_state_it_read(store)
     run = store.get_run("T1", up.run_id)
     assert run["state"] == "finalized" and "lease_flag" not in run
     assert [t["task_id"] for t in store.list_human_tasks("T1")] == ["H-1"]
+
+
+@pytest.mark.parametrize("failures", [1, 99])
+def test_a_routed_run_whose_task_write_fails_still_gets_its_task(store, failures):
+    """Step 10 closed the routed records, then the task put failed. The fail-closed handler finalized the run,
+    which drops its lease, and closed records are not open, so the sweep and the staleness check found nothing."""
+    from botocore.exceptions import ClientError
+
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    clock = FakeClock()
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": documents.faithful_extraction(C01_DOC)}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(), {"action": "schedule_payment", "params": {"payable_id": "x"}}]}}], clock=clock)
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    failed = []
+
+    def fail_task_writes(kw):
+        if "TASK#" in repr(kw) and len(failed) < failures:
+            failed.append(kw)
+            raise _throttled()
+
+    real = store.client
+    store.client = _WrappedClient(store, before=fail_task_writes)
+    try:
+        orch.process("T1", up.run_id)
+    except ClientError:
+        pass  # the task could not be opened at all, so the run must stay leased
+    finally:
+        store.client = real
+    assert failed
+    assert sorted(a["status"] for a in store.list_audits("T1", up.run_id)) == ["rejected", "routed"]
+    clock.advance(RUN_LEASE_SECONDS + 1)
+    orch.recover_stranded()
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["forbidden_action"]
+    assert store.get_run("T1", up.run_id)["state"] == "finalized"
+    assert [p["payable_id"] for p in store.list_payables("T1", "V-101")] == ["P-2"]

@@ -189,6 +189,12 @@ class Orchestrator:
             # Say honestly what exists: an exception after a commit leaves that write applied and audited.
             audits = self.store.list_audits(tenant_id, run_id)
             applied = [a["audit_id"] for a in audits if a["status"] == "applied"]
+            current = self.store.get_run(tenant_id, run_id) or {}
+            if current.get("route") == "human":
+                # Step 10 may have closed the routed records and then failed to open the task. Open it before the
+                # run is finalized: finalizing drops the lease, and closed records are not open, so nothing else
+                # would. If this fails too, the error leaves the run leased and the sweep finishes it.
+                self._open_task(tenant_id, run_id, current.get("route_reason") or "interrupted")
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "internal_error", trace, t0,
                                 [a["audit_id"] for a in audits],
                                 extra={"error": repr(exc)[:500], "applied_audit_ids": applied})
