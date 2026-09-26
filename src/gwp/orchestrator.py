@@ -537,12 +537,14 @@ class Orchestrator:
             if finalized:
                 return RunResult(run_id, run["outcome"], run.get("reason"), [])
             # Died before any audit record existed, so nothing was proposed or written. A person decides. The
-            # update is conditional on the state read here, so a worker that claims the run meanwhile wins.
-            if not self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
-                                                             "reason": "interrupted"}, ("finalized_on_resume", now),
-                                         expect_state=run["state"]):
+            # update is conditional on the state read here, so a worker that claims the run meanwhile wins. The
+            # run and its task are written in one transaction: finalizing drops the lease, so a crash between two
+            # separate writes left a finalized run with no task and nothing that would ever open it.
+            if not self.store.finalize_run_with_task(
+                    tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
+                                        "reason": "interrupted"}, ("finalized_on_resume", now),
+                    self._task(tenant_id, run_id, "interrupted"), expect_state=run["state"]):
                 return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
-            self._open_task(tenant_id, run_id, "interrupted")
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted")
         audit_ids = [a["audit_id"] for a in audits]
         if not run.get("audit_set_complete"):
@@ -590,10 +592,17 @@ class Orchestrator:
             return RunResult(run_id, outcome, run.get("route_reason"), audit_ids)
         return RunResult(run_id, outcome, run.get("reason"), audit_ids)
 
+    def _task(self, tenant_id: str, run_id: str, reason: str) -> dict:
+        return {"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id, "reason_code": reason,
+                "status": "open", "created_at": self.clock.now()}
+
     def _open_task(self, tenant_id: str, run_id: str, reason: str) -> None:
-        """Open a task for a person, once per run and reason, however many workers or sweeps get here."""
-        self.store.open_human_task({"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id,
-                                    "reason_code": reason, "status": "open", "created_at": self.clock.now()})
+        """Open a task for a person, once per run and reason, however many workers or sweeps get here.
+
+        Every caller opens the task before the run is finalized, or in the same transaction, so the run keeps its
+        lease until the task exists and the sweep can finish a run whose worker died in between.
+        """
+        self.store.open_human_task(self._task(tenant_id, run_id, reason))
 
     # -- step 11: approve -------------------------------------------------------------------
 

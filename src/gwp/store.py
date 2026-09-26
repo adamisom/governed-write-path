@@ -340,12 +340,9 @@ class DynamoStore:
     def list_runs(self, tenant_id: str) -> list[dict]:
         return self._query(RECORDS, tenant_pk(tenant_id), "RUN#")
 
-    def update_run(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None = None,
-                   expect_state: str | None = None) -> bool:
-        """Set fields on a run. With `expect_state`, only if the run is still in that state; returns False if not.
-
-        Finalizing a run removes its lease, so it leaves the `leased_runs` index.
-        """
+    def _run_update(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None,
+                    expect_state: str | None) -> dict:
+        """Build the conditional update of a run, as keyword arguments for UpdateItem or a transaction's Update."""
         names: dict[str, str] = {}
         values: dict[str, Any] = {}
         condition = "attribute_exists(pk)"
@@ -367,20 +364,59 @@ class DynamoStore:
         if fields.get("state") == "finalized":
             names["#lf"], names["#lu"] = "lease_flag", "lease_until"
             removes = " REMOVE #lf, #lu"
+        return {"TableName": self.tables[RECORDS],
+                "Key": serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
+                "UpdateExpression": "SET " + ", ".join(sets) + removes, "ConditionExpression": condition,
+                "ExpressionAttributeNames": names, "ExpressionAttributeValues": serialize_values(values)}
+
+    def update_run(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None = None,
+                   expect_state: str | None = None) -> bool:
+        """Set fields on a run. With `expect_state`, only if the run is still in that state; returns False if not.
+
+        Finalizing a run removes its lease, so it leaves the `leased_runs` index.
+        """
         try:
-            self.client.update_item(
-                TableName=self.tables[RECORDS],
-                Key=serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
-                UpdateExpression="SET " + ", ".join(sets) + removes,
-                ConditionExpression=condition,
-                ExpressionAttributeNames=names,
-                ExpressionAttributeValues=serialize_values(values),
-            )
+            self.client.update_item(**self._run_update(tenant_id, run_id, fields, history, expect_state))
         except ClientError as e:
             if expect_state is not None and e.response["Error"]["Code"] == "ConditionalCheckFailedException":
                 return False
             raise
         return True
+
+    def finalize_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
+                               task: dict, expect_state: str | None = None) -> bool:
+        """Finalize a run and open its task for a person in one transaction. Returns False if the run had left
+        `expect_state`.
+
+        Finalizing drops the run's lease, and the lease is how the sweep finds an unfinished run. Done as two
+        writes, a crash between them left a finalized run with no task and nothing that would ever open it.
+        """
+        if fields.get("state") != "finalized":
+            raise ValueError("finalize_run_with_task must finalize the run")
+        update = self._run_update(tenant_id, run_id, fields, history, expect_state)
+        try:
+            self.client.transact_write_items(TransactItems=[
+                {"Update": update},
+                {"Put": {"TableName": self.tables[RECORDS], "Item": serialize_item(self._task_item(task)),
+                         "ConditionExpression": "attribute_not_exists(pk)"}},
+            ])
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "TransactionCanceledException":
+                raise
+            reasons = [r.get("Code", "None") for r in e.response.get("CancellationReasons", [])]
+            if reasons[:1] == ["ConditionalCheckFailed"]:
+                return False  # another worker or sweep moved the run on first
+            if reasons[1:2] == ["ConditionalCheckFailed"]:
+                # The task is open already, so finalizing by itself leaves nothing to lose.
+                return self.update_run(tenant_id, run_id, fields, history, expect_state)
+            raise
+        return True
+
+    @staticmethod
+    def _task_item(task: dict) -> dict:
+        # Keyed by run and reason, not by task id, so a second open of the same task fails its condition.
+        return {"pk": tenant_pk(task["tenant_id"]), "sk": f"TASK#{task['run_id']}#{task['reason_code']}",
+                "kind": "human_task", **task}
 
     def open_human_task(self, task: dict) -> bool:
         """Open a task for a person, at most one per run and reason. Return False if that task already exists.
@@ -388,10 +424,8 @@ class DynamoStore:
         The item key is the run and the reason, not the task id, so two workers that both decide a run needs the
         same task can't open two: the second conditional put fails.
         """
-        item = {"pk": tenant_pk(task["tenant_id"]), "sk": f"TASK#{task['run_id']}#{task['reason_code']}",
-                "kind": "human_task", **task}
         try:
-            self.client.put_item(TableName=self.tables[RECORDS], Item=serialize_item(item),
+            self.client.put_item(TableName=self.tables[RECORDS], Item=serialize_item(self._task_item(task)),
                                  ConditionExpression="attribute_not_exists(pk)")
         except ClientError as e:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":

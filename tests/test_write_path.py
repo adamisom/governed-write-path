@@ -860,3 +860,105 @@ def test_opening_the_same_task_twice_keeps_one(store):
     assert store.open_human_task({**task, "task_id": "H-3", "reason_code": "unknown_vendor"}) is True
     assert sorted((t["task_id"], t["reason_code"]) for t in store.list_human_tasks("T1")) == [
         ("H-1", "interrupted"), ("H-3", "unknown_vendor")]
+
+
+# -- a crash between finalizing a run and opening its task (Codex round 3) ------------------------------------
+
+
+class _WrappedClient:
+    """Stands between the store and its DynamoDB client, to kill the worker or fail a call at a chosen write."""
+
+    def __init__(self, store, before=None, after=None):
+        self.real, self.store, self.before, self.after = store.client, store, before, after
+
+    def __getattr__(self, name):
+        attr = getattr(self.real, name)
+        if name not in ("put_item", "update_item", "transact_write_items"):
+            return attr
+
+        def call(**kw):
+            if self.before:
+                self.before(kw)
+            out = attr(**kw)
+            if self.after:
+                self.after(kw)
+            return out
+
+        return call
+
+
+def _throttled():
+    from botocore.exceptions import ClientError
+
+    return ClientError({"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "slow down"}},
+                       "PutItem")
+
+
+def test_a_crash_right_after_an_interrupted_run_is_finalized_leaves_its_task(store):
+    """Resume finalized the run, which drops its lease, and only then opened the task. A crash in between left a
+    finalized NEEDS_HUMAN run with no task that neither the sweep nor a later resume would ever repair."""
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    orch, up, clock = _die_in_reader(store)
+    clock.advance(RUN_LEASE_SECONDS + 1)
+
+    def die_once_finalized(kw):
+        if store.get_run("T1", up.run_id)["state"] == "finalized":
+            raise _Die()
+
+    real = store.client
+    store.client = _WrappedClient(store, after=die_once_finalized)
+    try:
+        with pytest.raises(_Die):
+            orch.recover_stranded()
+    finally:
+        store.client = real
+    run = store.get_run("T1", up.run_id)
+    assert (run["state"], run["reason"]) == ("finalized", "interrupted")
+    # Nothing is left for a later sweep or resume to repair, so the task must exist already.
+    assert orch.recover_stranded() == []
+    assert orch.resume("T1", up.run_id).reason == "interrupted"
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
+
+
+def test_a_failed_task_write_leaves_an_interrupted_run_leased_for_the_next_sweep(store):
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    orch, up, clock = _die_in_reader(store)
+    clock.advance(RUN_LEASE_SECONDS + 1)
+
+    def fail_task_write(kw):
+        if "TASK#" in repr(kw):
+            raise _throttled()
+
+    real = store.client
+    store.client = _WrappedClient(store, before=fail_task_write)
+    try:
+        with pytest.raises(Exception, match="slow down"):
+            orch.recover_stranded()
+    finally:
+        store.client = real
+    run = store.get_run("T1", up.run_id)
+    assert run["state"] == "text_extracted" and "lease_until" in run
+    (found,) = orch.recover_stranded()
+    assert (found["outcome"], store.get_run("T1", up.run_id)["reason"]) == ("NEEDS_HUMAN", "interrupted")
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
+
+
+def test_finalize_with_task_keeps_one_task_and_respects_the_state_it_read(store):
+    orch, _, _ = build(store, [], [])
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    task = {"tenant_id": "T1", "task_id": "H-1", "run_id": up.run_id, "reason_code": "interrupted",
+            "status": "open", "created_at": "2026-09-26T00:00:00Z"}
+    fields = {"state": "finalized", "outcome": "NEEDS_HUMAN", "reason": "interrupted"}
+    at = ("finalized_on_resume", "2026-09-26T00:00:00Z")
+    # The run moved on, so neither the run nor the task is written.
+    assert store.finalize_run_with_task("T1", up.run_id, fields, at, task, expect_state="text_extracted") is False
+    assert store.get_run("T1", up.run_id)["state"] == "received" and store.list_human_tasks("T1") == []
+    # The task is open already, so the run is finalized by itself and the task is not opened twice.
+    assert store.open_human_task(task) is True
+    assert store.finalize_run_with_task("T1", up.run_id, fields, at, {**task, "task_id": "H-2"},
+                                        expect_state="received") is True
+    run = store.get_run("T1", up.run_id)
+    assert run["state"] == "finalized" and "lease_flag" not in run
+    assert [t["task_id"] for t in store.list_human_tasks("T1")] == ["H-1"]
