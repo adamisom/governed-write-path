@@ -124,6 +124,24 @@ footer { margin-top: 4rem; color: var(--muted); font-size: .85rem; }
   .toc { columns: 1; }
   table { font-size: .8rem; }
 }
+/* Wide screens: the table of contents becomes a small panel fixed in the upper left. */
+@media (min-width: 1300px) {
+  .toc {
+    position: fixed; top: 1.25rem; left: 1.25rem; z-index: 10;
+    width: calc((100vw - 44rem) / 2 - 2.5rem); max-width: 16rem;
+    max-height: calc(100vh - 2.5rem); overflow-y: auto;
+    columns: 1; margin: 0; padding: .7rem .8rem .7rem 1.9rem;
+    font-size: .74rem; line-height: 1.35;
+    background: var(--bg); border: 1px solid var(--rule); border-radius: 6px;
+  }
+  .toc li { margin-bottom: .3rem; }
+  .toc a { color: var(--muted); text-decoration: none; }
+  .toc a:hover { color: var(--fg); text-decoration: underline; }
+  .toc a.active { color: var(--accent); font-weight: 600; }
+}
+@media print {
+  .toc { position: static; }
+}
 @media print {
   :root { --bg: #fff; --fg: #000; --muted: #444; --rule: #bbb; --box: #f6f6f6; --code-bg: #f3f3f3; --accent: #000; color-scheme: light; }
   body { font-size: 11pt; background: #fff; }
@@ -926,6 +944,20 @@ window.addEventListener("beforeprint", function () {
 window.addEventListener("afterprint", function () {
   document.querySelectorAll("details").forEach(function (d) { d.open = d.dataset.wasOpen === "1"; });
 });
+</script>
+<script>
+// Mark the section being read in the table of contents.
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+  var heads = links.map(function (a) { return document.getElementById(a.hash.slice(1)); });
+  function update() {
+    var current = 0;
+    heads.forEach(function (h, i) { if (h && h.getBoundingClientRect().top < 140) current = i; });
+    links.forEach(function (a, i) { a.classList.toggle("active", i === current); });
+  }
+  window.addEventListener("scroll", update, { passive: true });
+  update();
+})();
 </script>
 </body>
 </html>
