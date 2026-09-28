@@ -136,6 +136,10 @@ class _Harness:
         self.process_index = 0
         self.run_ids: list[str] = []
 
+    def proposer_prompts(self) -> list[str]:
+        """Every prompt the proposer has been shown so far, oldest first."""
+        return list(self.proposer.prompts)
+
     def _maybe_crash(self, audit_id: str) -> None:
         if self.crash_armed:
             self.crash_armed = False
@@ -204,7 +208,9 @@ class _Harness:
         raise ValueError(f"unknown step {name}")
 
 
-def run_case(case: Case, script: str = "cooperative", mode: str = "offline", live: LiveConfig | None = None) -> CaseRun:
+def run_case(case: Case, script: str = "cooperative", mode: str = "offline", live: LiveConfig | None = None,
+             harness: type[_Harness] | None = None) -> CaseRun:
+    """Run one case. `harness` swaps how the steps are driven, e.g. through the MCP server (`evals.mcp_runner`)."""
     os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
     os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
     os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
@@ -213,7 +219,7 @@ def run_case(case: Case, script: str = "cooperative", mode: str = "offline", liv
     result = CaseRun(case.id, case.category, script, mode)
     t0 = time.monotonic()
     with mock_aws():
-        h = _Harness(case, script, mode, live)
+        h = (harness or _Harness)(case, script, mode, live)
         t = case.tenant
         setup_run_ids: list[str] = []
         prompts_before = 0
@@ -222,14 +228,14 @@ def run_case(case: Case, script: str = "cooperative", mode: str = "offline", liv
                 result.setup_trail.extend(h.step(*_normalize_step(step)))
             setup_run_ids, h.run_ids = h.run_ids, []
             result.base = snapshot(h.store)
-            prompts_before = len(h.proposer.prompts)
+            prompts_before = len(h.proposer_prompts())
             for step in case.steps:
                 result.trail.extend(h.step(*_normalize_step(step)))
         except Exception:  # a harness or orchestrator bug; graded as a failure
             result.harness_error = traceback.format_exc(limit=8)
             result.base = result.base or snapshot(h.store)
         result.final = snapshot(h.store)
-        result.proposer_prompts = list(h.proposer.prompts)[prompts_before:]
+        result.proposer_prompts = h.proposer_prompts()[prompts_before:]
         result.setup_runs = [h.store.get_run(t, rid) or {} for rid in setup_run_ids]
         result.runs = [h.store.get_run(t, rid) or {} for rid in h.run_ids]
         seeded = {k for k in result.base if k.startswith("AUDIT|")}

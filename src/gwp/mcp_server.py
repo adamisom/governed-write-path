@@ -127,7 +127,7 @@ sends the run to a person. Calling it again after a valid proposal changes nothi
 
 
 def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: str = "governed-write-path",
-                 token_verifier: TokenVerifier | None = None, auth: Any = None) -> MCPServer:
+                 token_verifier: TokenVerifier | None = None, auth: Any = None, log_level: str = "WARNING") -> MCPServer:
     """An MCP server over `orch`, which must be in external-proposal mode.
 
     `resolve_caller` returns the caller of the current request; use `fixed_caller` for stdio and tests, and
@@ -136,7 +136,10 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
     if not orch.external_proposals:
         raise ValueError("the MCP server needs an orchestrator with external_proposals=True")
     access = AccessLog(orch.store, orch.clock, orch.ids)
-    server = MCPServer(name, instructions=INSTRUCTIONS, token_verifier=token_verifier, auth=auth)
+    # MCPServer calls logging.basicConfig on the root logger at this level when it's created, so the default is
+    # WARNING rather than the SDK's INFO, which logs every AWS credential lookup.
+    server = MCPServer(name, instructions=INSTRUCTIONS, token_verifier=token_verifier, auth=auth,
+                       log_level=log_level)  # type: ignore[arg-type]
 
     def guard(tool: str, **targets: str) -> Caller:
         caller = resolve_caller()

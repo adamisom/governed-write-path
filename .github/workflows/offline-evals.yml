@@ -26,9 +26,13 @@ jobs:
         run: uv run pytest -m eval
       - name: Offline eval report (fails if a cooperative case fails or an unpredicted case is unsafe)
         run: uv run gwp eval --mode offline --out eval-out --fail-on-regression
+      - name: Every case through the MCP server (fails if any verdict differs from the direct run)
+        run: uv run gwp mcp replay --out eval-out
       - name: Publish the report to the job summary
         if: always()
-        run: cat eval-out/eval-offline-cooperative-adversarial.md >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          cat eval-out/eval-offline-cooperative-adversarial.md >> "$GITHUB_STEP_SUMMARY"
+          cat eval-out/mcp-replay.md >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

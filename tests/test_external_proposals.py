@@ -192,3 +192,12 @@ def test_the_internal_path_is_unchanged_when_external_mode_is_off(store):
     assert orch.external_proposals is False
     _, res, _, _ = run_doc(store, C01_DOC, [c01_post()])
     assert res.outcome == "APPLIED"
+
+
+def test_the_runs_latency_counts_the_servers_work_and_not_the_wait_for_the_agent(store):
+    orch, res, clock = parked(store)
+    prepare = store.get_run("T1", res.run_id)["prepare_latency_ms"]
+    clock.advance(600)  # the agent takes ten minutes
+    orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT)
+    latency = store.get_run("T1", res.run_id)["latency_ms"]
+    assert prepare <= latency < prepare + 600_000

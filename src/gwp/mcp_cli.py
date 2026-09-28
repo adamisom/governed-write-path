@@ -1,6 +1,8 @@
 """`gwp mcp`: serve the governed write path over MCP, or run the offline walkthrough.
 
     gwp mcp walkthrough                                  propose, approve and revert over HTTP, offline
+    gwp mcp replay --out eval-out                        every graded case through the MCP server, compared
+                                                         with the direct run; exits 1 if any verdict differs
     gwp mcp serve --demo --transport http --port 8765    the demo over streamable HTTP; clients send a demo key
     gwp mcp serve --demo --transport stdio --key demo-agent-key
     gwp mcp serve --transport http                       live: DynamoDB tables and a reader model from the
@@ -38,12 +40,36 @@ def _live_orchestrator():
                         NoInternalProposer(), Clock(), UuidIds(), external_proposals=True)
 
 
+def _replay(args: argparse.Namespace) -> int:
+    """Replay every graded case through the MCP server with both scripts, and write the parity report."""
+    import json
+    from pathlib import Path
+
+    from .evals.cases import load_cases
+    from .evals.mcp_runner import compare, report
+
+    cases = load_cases()
+    if args.only:
+        cases = [c for c in cases if c.id in set(args.only.split(","))]
+    parities = [compare(c, s)[2] for s in ("cooperative", "adversarial") for c in cases]
+    text, data = report(parities)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "mcp-replay.md").write_text(text + "\n")
+    (out / "mcp-replay.json").write_text(json.dumps(data, indent=1, default=str))
+    print(text)
+    differ = [p for p in parities if not p.same]
+    return 1 if differ else 0
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     logging.getLogger("strands").setLevel(logging.CRITICAL)
     import anyio
 
     from .mcp_demo import DEMO_KEYS, build_demo, demo_keys_json, walkthrough
 
+    if args.action == "replay":
+        return _replay(args)
     if args.action == "walkthrough":
         for name in ("mcp", "httpx", "httpx2"):  # request logs would bury the walkthrough
             logging.getLogger(name).setLevel(logging.WARNING)
@@ -89,7 +115,9 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 
 def add_parser(sub) -> None:
     m = sub.add_parser("mcp", help="serve the write path over MCP, or run the offline walkthrough")
-    m.add_argument("action", choices=["serve", "walkthrough"])
+    m.add_argument("action", choices=["serve", "walkthrough", "replay"])
+    m.add_argument("--out", default="eval-out", help="replay: where to write mcp-replay.md and .json")
+    m.add_argument("--only", default=None, help="replay: comma-separated case ids")
     m.add_argument("--demo", action="store_true", help="a seeded in-process store and a scripted reader, offline")
     m.add_argument("--transport", choices=["stdio", "http"], default="http")
     m.add_argument("--host", default="127.0.0.1")

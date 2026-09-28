@@ -261,7 +261,7 @@ class Orchestrator:
 
         if self.external_proposals:
             # An outside agent proposes, over MCP. Park the run with what it needs; `submit_proposal` goes on.
-            return self._park(tenant_id, run_id, trace)
+            return self._park(tenant_id, run_id, trace, t0)
 
         # Step 6 and 7: propose and validate. One retry for an invalid proposal or a failed call.
         retriever = self.retriever_factory(tenant_id) if self.search_enabled else None
@@ -377,7 +377,7 @@ class Orchestrator:
 
     # -- external proposals: an outside agent proposes, e.g. over MCP ----------------------------------
 
-    def _park(self, tenant_id: str, run_id: str, trace: dict) -> RunResult:
+    def _park(self, tenant_id: str, run_id: str, trace: dict, t0: float) -> RunResult:
         """The end of step 5 in external-proposal mode. The run waits, leased, for an agent's proposal.
 
         The extraction and the step 3 and 5 trace are kept on the run, so `submit_proposal` can go on from here in
@@ -388,7 +388,10 @@ class Orchestrator:
         fields = {"state": "awaiting_proposal", "outcome": RunOutcome.AWAITING_PROPOSAL,
                   "extraction": trace["extraction"], "extraction_flags": trace["extraction_flags"],
                   "model_calls": trace["model_calls"], "retrieved": trace["retrieved"], "searches": [],
-                  "proposal_attempts": [], "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS)}
+                  "proposal_attempts": [], "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS),
+                  # The server's own time so far. The run's latency adds the time after the proposal arrives, and
+                  # leaves out the time the run waited for the agent.
+                  "prepare_latency_ms": int((self.clock.monotonic() - t0) * 1000)}
         if not self.store.update_run(tenant_id, run_id, fields, ("awaiting_proposal", now),
                                      expect_state="text_extracted"):
             return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
@@ -470,7 +473,7 @@ class Orchestrator:
                                                          "lease_until": iso_plus(now, RUN_LEASE_SECONDS)},
                                      ("proposing", now), expect_state="awaiting_proposal"):
             return self._current(self.store.get_run(tenant_id, run_id) or run)
-        t0 = self.clock.monotonic()
+        t0 = self.clock.monotonic() - run.get("prepare_latency_ms", 0) / 1000
         trace: dict = {k: list(run.get(k) or []) for k in ("model_calls", "retrieved", "searches", "proposal_attempts")}
         trace["extraction"], trace["extraction_flags"] = run["extraction"], list(run.get("extraction_flags") or [])
         try:
