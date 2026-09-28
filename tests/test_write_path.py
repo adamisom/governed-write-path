@@ -483,6 +483,27 @@ def test_resume_finishes_an_approved_write_whose_worker_died(store):
     assert len(store.list_payables("T1", "V-101")) == 2
 
 
+def test_a_retried_approval_repairs_the_run_after_a_crash_between_apply_and_the_run_update(store):
+    """Case D12: the write applied, then the worker died before the run's outcome was updated. The run had no lease
+    left for the sweep, and the approver's retry returned already_decided without touching the run, so it said
+    PENDING_APPROVAL for good."""
+    from gwp.executor import SimulatedCrash
+
+    orch, res, _, _ = run_doc(store, C01_DOC, [c01_post(requires_approval_reason="x")])
+    aid = res.audit_ids[0]
+    real_refresh = orch._refresh_run_outcome
+    orch._refresh_run_outcome = lambda t, r: (_ for _ in ()).throw(SimulatedCrash(r))
+    with pytest.raises(SimulatedCrash):
+        orch.approve("T1", aid, APPROVER, "approve")
+    orch._refresh_run_outcome = real_refresh
+    assert store.get_audit("T1", aid)["status"] == "applied"
+    assert store.get_run("T1", res.run_id)["outcome"] == "PENDING_APPROVAL"
+    retry = orch.approve("T1", aid, APPROVER, "approve")
+    assert (retry.status, retry.run_outcome) == ("already_decided", "APPLIED")
+    assert store.get_run("T1", res.run_id)["outcome"] == "APPLIED"
+    assert len(store.list_payables("T1", "V-101")) == 2
+
+
 # -- exceptions after a commit, resume, and claiming a run (audit findings 4, 9, 14 and 19) -----------------
 
 

@@ -367,3 +367,12 @@ Source: build, after the third Codex review.
 - **Alternative.** Open the task first and finalize second in the no-audit branch too. That also leaves no window, but if the conditional finalize then failed because another worker had moved the run, a person would get a task for a run that was not stopped. The transaction writes both or neither.
 - **Why.** The rule is now the same everywhere: a run that owes a person a task is finalized only after the task exists or in the same transaction, so the lease stays until the task does. The transaction's two items are on the records table, so the Lambda role's `UpdateItem` and `PutItem` on that table already cover it. The flow the IAM test records now includes a stranded run that the sweep finalizes this way, and the policy did not change.
 - **Still open.** A run that fails closed before step 10 opens no task, as before. Its outcome, NEEDS_HUMAN, is how a person finds it, and any audit record it left at `proposed` shows up in the staleness check. That includes a run whose bank change follow-up task could not be opened, which also posted nothing.
+
+## 45. A retried approval repairs the run's outcome
+
+Source: planning the case expansion (case D12), 9/28.
+
+- **Context.** `approve` moves the audit record to `approved`, the executor applies the write, and then `_refresh_run_outcome` updates the run. A run waiting for approval is already finalized, so it has no lease and the sweep never visits it. If the worker died after the apply and before the run update, the write was applied but the run said PENDING_APPROVAL. The approver's retry lost the compare-and-set and returned `already_decided` without touching the run, so nothing ever repaired it. A test reproduces it by making the run update crash once.
+- **Choice.** The `already_decided` branch also calls `_refresh_run_outcome`, which recomputes the outcome from the run's audit records and is safe to repeat, and returns it.
+- **Alternative.** Give a run waiting for approval a lease, so the sweep repairs it. That adds a lease that would expire for every approval a person takes more than an hour on, for a gap that the approver's own retry closes.
+- **Why.** The retry is how a client learns what happened after a crash, so it should leave the run correct. The fix changes no write and no tier.

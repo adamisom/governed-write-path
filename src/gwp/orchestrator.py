@@ -629,7 +629,9 @@ class Orchestrator:
              "decline_note": (note or "")[:500]}, terminal=(to == AuditStatus.declined))
         if not ok:
             current = self.store.get_audit(tenant_id, audit_id) or {}
-            return DecisionResult("already_decided", audit_id, detail=current.get("status"))
+            # A retry after a crash between the write and the run update repairs the run's outcome (case D12).
+            outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
+            return DecisionResult("already_decided", audit_id, outcome, detail=current.get("status"))
         status = "declined"
         if decision == "approve":
             res = self.executor.apply(tenant_id, audit_id)
