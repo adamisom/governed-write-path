@@ -975,6 +975,8 @@ class Orchestrator:
         return DecisionResult(status, audit_id, outcome)
 
     def _refresh_run_outcome(self, tenant_id: str, run_id: str) -> str | None:
+        if self.store.get_run(tenant_id, run_id) is None:
+            return None  # e.g. the seeded record A-2, whose run R-SEED has no record; there is nothing to update
         audits = [a for a in self.store.list_audits(tenant_id, run_id) if a["action"] in WRITE_ACTIONS]
         statuses = {a["status"] for a in audits}
         if not audits:

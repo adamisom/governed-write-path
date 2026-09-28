@@ -535,3 +535,11 @@ Source: second Fable audit, 9/28/26 (GWP2-5).
 - **Evidence.** The audit's reproduction D injected one cancellation with reasons `TransactionConflict` and then `None`. moto doesn't simulate contention, so the tests inject it the same way.
 - **Choice.** The executor marks the record `failed` only when at least one operation reports `ConditionalCheckFailed`. For any other cancellation it leaves the record at its status, records the reasons with `append_audit_note` (a history entry `apply_cancelled:<codes>` and a `cancellation_reasons` field), and returns `retryable`. `approve` returns `retryable`, and the HTTP API answers 503. The approver's retry then applies the write (entry 47). An auto write stays at `proposed`, the run says NEEDS_HUMAN with `apply_failed`, and the staleness pass applies it within about 30 minutes.
 - **Still open.** A cancellation for a reason that will never clear, e.g. `ValidationError` for an item over the size limit, is also treated as retryable, so the staleness pass retries it every 15 minutes and notes each attempt on the record. The MCP server's `decide` tool passes the new `retryable` status through as it is.
+
+## 52. Refreshing the outcome of a run with no run record does nothing
+
+Source: second Fable audit, 9/28/26 (GWP2-7).
+
+- **Before.** `_refresh_run_outcome` updated the run without `expect_state`, and `update_run` re-raises a failed condition in that case. The seeded record A-2 belongs to run R-SEED, which has no run record, so `POST /approvals/A-2` raised a `ClientError` that the handler didn't catch, and API Gateway would have answered 500. Every record the service creates has a run, so only seeded data could hit it.
+- **Choice.** `_refresh_run_outcome` returns `None` at once when the run doesn't exist, so the call answers `already_decided` like any other decided record. A test approves A-2.
+- **Alternative.** Seed a run record for R-SEED. That fixes the seed, and not the next record that outlives its run.

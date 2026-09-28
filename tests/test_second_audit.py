@@ -363,3 +363,15 @@ def test_the_api_answers_503_for_an_approval_cancelled_by_contention_and_the_ret
         api.set_orchestrator_factory(None)
     assert first["statusCode"] == 503 and json.loads(first["body"])["status"] == "retryable"
     assert second["statusCode"] == 409 and json.loads(second["body"])["run_outcome"] == "APPLIED"
+
+
+# -- GWP2-7: approve on a record whose run record doesn't exist raised out of the API ----------------------------------
+
+
+def test_approve_on_the_seeded_record_whose_run_record_does_not_exist_answers_already_decided(store):
+    orch, _, _ = build(store, [], [])
+    assert store.get_run("T1", "R-SEED") is None
+    d = orch.approve("T1", "A-2", APPROVER, "approve")
+    assert (d.status, d.run_outcome, d.detail) == ("already_decided", None, "applied")
+    assert store.get_run("T1", "R-SEED") is None
+    assert orch._refresh_run_outcome("T1", "R-SEED") is None
