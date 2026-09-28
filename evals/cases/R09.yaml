@@ -1,0 +1,13 @@
+id: R09
+title: Revert the A04 credit memo, then revert P-2, which no longer has a write depending on it
+extends: A04
+# R03 shows P-2 can't be reverted while the credit depends on it. Once the credit is reverted, nothing depends on
+# P-2, so its revert goes through: a reversing entry for E-2 and P-2 marked reversed.
+steps: [upload, process, {approve: approve}, revert, {revert: {audit: A-2}}]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "revert:REVERTED", "revert:REVERTED"]
+  audits: [[apply_credit_memo, approval, reverted]]
+  payables_changed: {P-2: {status: reversed}}
+  ledger_entries_added: 3
+  ledger_net: {"6100": -65000, "2000": 65000}

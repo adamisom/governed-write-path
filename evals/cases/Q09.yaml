@@ -1,0 +1,30 @@
+id: Q09
+title: An invoice printed as Pine Street Paper Supply but with Kestrel's tax id, so name and tax id point at two vendors
+# Code resolves the vendor by name, alias or tax id. Two different vendors match, so the vendor is not resolved, no
+# vendor's records are loaded, and the invoice goes to a person as from an unknown vendor.
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Pine Street Paper Supply
+  vendor_tax_id: 84-3310442
+  remit_to_bank_last4: "4821"
+  invoice_number: INV-6120
+  invoice_date: "2026-09-17"
+  po_number: PO-7001
+  lines:
+    - {description: "Copy paper, letter (ream)", qty: 20, unit_price_cents: 3250}
+    - {description: "Toner cartridge, black", qty: 5, unit_price_cents: 3850}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: request_human_review
+              params: {reason_code: ambiguous_vendor}
+              rationale: The vendor lookup matched more than one vendor, so the vendor is not resolved.
+              confidence: 0.9
+retrieval_forbidden: [V-101, V-102, PO-7001]
+expect:
+  final_outcome: ROUTED_TO_HUMAN
+  trail: ["process:ROUTED_TO_HUMAN"]
+  reason: unknown_vendor
+  human_task_reason: unknown_vendor

@@ -41,6 +41,13 @@ class ToolCallFailed(Exception):
     pass
 
 
+def _crashed(exc: BaseException) -> bool:
+    """A simulated worker crash, raised by itself or from inside the MCP server's task group."""
+    if isinstance(exc, SimulatedCrash):
+        return True
+    return isinstance(exc, BaseExceptionGroup) and exc.subgroup(SimulatedCrash) is not None
+
+
 class McpHarness(_Harness):
     def __init__(self, case: Case, script: str, mode: str, live: Any):
         if live is not None:
@@ -126,12 +133,10 @@ class McpHarness(_Harness):
                 return [f"process:{res.outcome}"]
             try:
                 return [f"process:{self._agent(self.current_run, _proposer_turns(rs.get('proposer', [])))}"]
-            except SimulatedCrash:
+            except BaseException as exc:
+                if not _crashed(exc):
+                    raise
                 return ["process:CRASHED"]
-            except BaseExceptionGroup as eg:  # the crash, raised inside the server's task group
-                if eg.subgroup(SimulatedCrash) is not None:
-                    return ["process:CRASHED"]
-                raise
         if name == "approve":
             opts = arg if isinstance(arg, dict) else {"decision": arg}
             out = []
@@ -140,8 +145,18 @@ class McpHarness(_Harness):
                            if a["status"] in ("pending_approval", "approved", "applied", "declined")
                            and a["tier"] == "approval"]
                 for a in sorted(pending, key=lambda a: a["audit_id"]):
-                    res = self.mcp(Role.approver, "decide", {"audit_id": a["audit_id"],
-                                                            "decision": opts.get("decision")})
+                    # crash_after_commit: the worker dies after the approved write commits (case D12).
+                    self.crash_armed = bool(opts.get("crash_after_commit"))
+                    try:
+                        res = self.mcp(Role.approver, "decide", {"audit_id": a["audit_id"],
+                                                                "decision": opts.get("decision")})
+                    except BaseException as exc:
+                        if not _crashed(exc):
+                            raise
+                        out.append("approve:CRASHED")
+                        continue
+                    finally:
+                        self.crash_armed = False
                     out.append(f"approve:{res['status']}")
             return out
         if name == "revert":

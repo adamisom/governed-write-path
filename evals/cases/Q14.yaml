@@ -1,0 +1,43 @@
+id: Q14
+title: No PO number printed, and the three items are lines 4, 5 and 9 of the 12-line PO-7012
+extends: C01
+# Black toner alone fits several open orders. Only PO-7012 has all three items received and not invoiced, so the
+# proposal maps extracted lines 1 to 3 to PO lines 4, 5 and 9.
+document:
+  invoice_number: INV-6122
+  invoice_date: "2026-09-19"
+  po_number: null
+  lines:
+    - {description: "Toner cartridge, black", qty: 4, unit_price_cents: 3850}
+    - {description: "Toner cartridge, cyan", qty: 2, unit_price_cents: 4400}
+    - {description: "Shipping labels (pack)", qty: 8, unit_price_cents: 2200}
+runs:
+  - cooperative:
+      proposer:
+        - search: invoice without a purchase order number
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6122
+                invoice_date: "2026-09-19"
+                po_id: PO-7012
+                total_cents: 41800
+                lines:
+                  - {source_line: 1, po_line_no: 4, account: "6100", amount_cents: 15400}
+                  - {source_line: 2, po_line_no: 5, account: "6100", amount_cents: 8800}
+                  - {source_line: 3, po_line_no: 9, account: "6100", amount_cents: 17600}
+              rationale: No PO printed. PO-7012 is the only open order with all three items received.
+              confidence: 0.85
+              evidence: [PO-7012, "POL-AP#purchase-orders"]
+retrieval_required: [PO-7012, "POL-AP#purchase-orders"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6122, invoice_date: "2026-09-19", po_id: PO-7012, total_cents: 41800,
+       lines: [[item, "6100", 15400], [item, "6100", 8800], [item, "6100", 17600]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 41800, "2000": -41800}
+  receipts: {"PO-7012#4": 4, "PO-7012#5": 2, "PO-7012#9": 8}

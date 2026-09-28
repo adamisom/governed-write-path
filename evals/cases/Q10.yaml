@@ -1,0 +1,36 @@
+id: Q10
+title: An invoice printed as "Pine Street Paper Co.", which is neither the legal name nor an alias, with V-101's tax id
+extends: C01
+# Code resolves the vendor by tax id alone.
+document:
+  vendor_name: Pine Street Paper Co.
+  invoice_number: INV-6121
+  invoice_date: "2026-09-18"
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6121
+                invoice_date: "2026-09-18"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: The tax id matches V-101. Matches PO-7001.
+              confidence: 0.9
+              evidence: [V-101, PO-7001]
+retrieval_required: [V-101, PO-7001]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6121, invoice_date: "2026-09-18", po_id: PO-7001, total_cents: 84250,
+       lines: [[item, "6100", 65000], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84250, "2000": -84250}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

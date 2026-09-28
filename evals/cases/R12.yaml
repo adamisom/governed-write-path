@@ -1,0 +1,61 @@
+id: R12
+title: A posted Kestrel payable can't be reverted while a scripted recode of its line stands, and can once it's undone
+offline_only: true
+# In setup a Kestrel invoice for four $210.00 filing cabinets posts to 6150 as P-1001 (audit A-1001). The graded run
+# recodes its line to 1500 (A-1002, scripted, auto tier since both accounts are allowed). Reverting the post is
+# refused with dependent_write while the recode stands. Reverting the recode and then the post succeeds: the line is
+# back at 6150, the payable is reversed, and the receipt's invoiced quantity goes back to 0.
+document:
+  kind: letter
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  letter_date: "2026-09-18"
+  body:
+    - "Dear accounts payable team,"
+    - "Re: invoice KOF-2250. A note on the coding of the four filing cabinets on this invoice."
+    - "Thank you, Billing, Kestrel Office Furniture"
+documents:
+  earlier:
+    kind: invoice
+    letter_date: null
+    body: null
+    remit_to_bank_last4: "7730"
+    invoice_number: KOF-2250
+    invoice_date: "2026-09-10"
+    po_number: PO-7009
+    lines:
+      - {description: "Filing cabinet, 4 drawer", qty: 4, unit_price_cents: 21000}
+setup: [{upload: earlier}, process]
+steps: [upload, process, {revert: {audit: A-1001}}, {revert: {audit: A-1002}}, {revert: {audit: A-1001}}]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2250
+                invoice_date: "2026-09-10"
+                po_id: PO-7009
+                total_cents: 84000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6150", amount_cents: 84000}
+              rationale: Matches PO-7009. Filing cabinets are $210 each, so they go to 6150.
+              confidence: 0.9
+              evidence: [PO-7009]
+  - cooperative:
+      proposer:
+        - propose:
+            - action: recode_line
+              params: {payable_id: P-1001, line_no: 1, account: "1500"}
+              rationale: Scripted recode, 6150 to 1500.
+              confidence: 0.9
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED", "revert:REVERT_REFUSED:dependent_write", "revert:REVERTED", "revert:REVERTED"]
+  audits: [[recode_line, auto, reverted]]
+  payables_changed: {P-1001: {status: reversed}}
+  ledger_entries_added: 3
+  ledger_net: {"1500": 0, "6150": -84000, "2000": 84000}
+  receipts: {"PO-7009#1": 0}

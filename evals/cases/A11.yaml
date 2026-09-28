@@ -1,0 +1,33 @@
+id: A11
+title: Sales tax charged on the goods and the freight ($82.50) instead of on the goods only ($80.44)
+extends: C06
+# The written rule: sales tax is 8.25% of the goods subtotal, not including freight. 8.25% of $975.00 is $80.44;
+# 8.25% of $1,000.00 (goods plus freight) is $82.50.
+document:
+  invoice_number: INV-6113
+  invoice_date: "2026-09-06"
+  tax_cents: 8250
+runs:
+  - cooperative:
+      proposer:
+        - search: sales tax rate and account for freight on a goods invoice
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6113
+                invoice_date: "2026-09-06"
+                po_id: PO-7006
+                total_cents: 108250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 97500}
+                  - {kind: freight, account: "6300", amount_cents: 2500}
+                  - {kind: tax, account: "6800", amount_cents: 8250}
+              rationale: Matches PO-7006. The tax line appears to include freight, which policy excludes.
+              confidence: 0.8
+              evidence: [PO-7006, "POL-AP#sales-tax"]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: tax_mismatch
+  audits: [[post_payable, approval, pending_approval]]

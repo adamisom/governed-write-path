@@ -90,6 +90,12 @@ PURCHASE_ORDERS = [
     ]),
     _po("PO-7013", "V-105", [("Palletized freight, Austin to Dallas", 1, 64_000, 1)]),
     _po("PO-7014", "V-101", [(PAPER, 30, 3250, 30)]),
+    # Added with the case expansion (DECISIONS 46): edge values for the auto limit, the prose freight rule and the
+    # prose furniture rule, and a purchase order for tenant T2 so it can process an invoice of its own.
+    _po("PO-7015", "V-102", [("Conference table, maple", 1, 250_000, 1)]),
+    _po("PO-7016", "V-105", [("Palletized freight, Austin to Houston", 1, 50_000, 1)]),
+    _po("PO-7017", "V-102", [("Storage cabinet, steel", 2, 100_000, 2)]),
+    _po("PO-8001", "V-201", [("Crown fabrication", 2, 30_000, 2)], tenant="T2"),
 ]
 
 CONTRACTS = [

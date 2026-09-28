@@ -1,0 +1,13 @@
+id: L04
+title: The proposer times out twice
+extends: C01
+offline_only: true
+# The reader succeeds. The proposer gets one retry with backoff, then the run ends with a person and no write.
+runs:
+  - cooperative:
+      proposer: [{raise: timeout}, {raise: timeout}]
+expect:
+  final_outcome: NEEDS_HUMAN
+  trail: ["process:NEEDS_HUMAN"]
+  reason: model_timeout
+  model_calls: 3

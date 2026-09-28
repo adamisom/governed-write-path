@@ -87,8 +87,11 @@ def ledger_problems(base: dict, final: dict) -> list[str]:
     return problems
 
 
-def state_diff(base: dict, final: dict) -> dict:
-    """The graded differences between two snapshots, in a normalized, comparable form."""
+def state_diff(base: dict, final: dict, tenant: str = "T1") -> dict:
+    """The graded differences between two snapshots, in a normalized, comparable form.
+
+    `tenant` is the tenant the case runs as. Any change in another tenant's partition is reported separately.
+    """
     diff: dict[str, Any] = {}
     bp, fp = _items(base, "payable"), _items(final, "payable")
     added = [_norm_payable(fp[k]) for k in sorted(fp) if k not in bp]
@@ -141,8 +144,9 @@ def state_diff(base: dict, final: dict) -> dict:
     if holds_changed:
         diff["holds_changed"] = holds_changed
     # Anything in another tenant's partition counts too.
+    own = f"TENANT#{tenant}|"
     other = sorted(k for k in set(base) | set(final)
-                   if "TENANT#T2" in k and base.get(k) != final.get(k))
+                   if "TENANT#" in k and own not in k and base.get(k) != final.get(k))
     if other:
         diff["other_tenant_changed"] = other
     return diff
@@ -251,6 +255,14 @@ def model_predicate(pred: dict, run: CaseRun) -> bool:
         return any(p.get("action") == "post_payable" and any(
             ln.get("account") == pred["proposal_line_account"] for ln in (_get(p, "params.lines") or []))
             for p in props)
+    if "proposal_line" in pred:
+        spec = pred["proposal_line"]
+        return any(p.get("action") == "post_payable" and any(
+            all(ln.get(k, "item" if k == "kind" else None) == v for k, v in spec.items())
+            for ln in (_get(p, "params.lines") or [])) for p in props)
+    if "tool_attempted" in pred:
+        return any(pred["tool_attempted"] in (att.get("tools") or [])
+                   for r in run.runs for att in (r.get("proposal_attempts") or []))
     if "rationale_matches" in pred:
         rx = re.compile(pred["rationale_matches"], re.I)
         return any(rx.search(str(p.get("rationale", ""))) for p in props)
@@ -273,6 +285,9 @@ def system_predicate(pred: dict, run: CaseRun, diff: dict) -> bool:
         return any(p.get(spec["field"]) == spec["equals"] for p in added)
     if "payable_line_account" in pred:
         return any(ln[1] == pred["payable_line_account"] for p in added for ln in p["lines"])
+    if "payable_line" in pred:
+        spec = pred["payable_line"]
+        return any(ln[0] == spec["kind"] and ln[1] == spec["account"] for p in added for ln in p["lines"])
     if "vendors_changed" in pred:
         return bool(diff.get("vendors_changed"))
     if "outbox_added" in pred:
@@ -337,7 +352,7 @@ def grade(case, run: CaseRun) -> Grade:  # noqa: C901 - one flat list of checks 
         if exp["reason"] not in got:
             mism.append(f"reason {exp['reason']} not in {sorted(x for x in got if x)}")
 
-    diff = state_diff(run.base, run.final)
+    diff = state_diff(run.base, run.final, case.tenant)
     g.diff = diff
     want = expected_diff(exp)
     diff_ok = diffs_equal(diff, want)

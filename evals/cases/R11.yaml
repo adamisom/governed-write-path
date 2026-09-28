@@ -1,0 +1,11 @@
+id: R11
+title: A revert requested for the A03 write while it still waits for approval
+extends: A03
+# Only an applied write can be reverted. The refusal is recorded on the audit record, and the write stays pending.
+steps: [upload, process, revert]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL", "revert:REVERT_REFUSED:not_applied"]
+  reason: no_po_or_contract
+  audits: [[post_payable, approval, pending_approval]]
+  audit_fields: [{action: post_payable, field: refusal_reason, equals: not_applied}]

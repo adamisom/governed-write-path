@@ -1,0 +1,38 @@
+id: C07
+title: Pine Street paper billed exactly 2% over the PO price ($33.15 against $32.50), which is inside the tolerance
+extends: C01
+# Edge value. The policy allows a price within 2% per line, so exactly 2.00% is within it: 20 reams at $33.15 is
+# $663.00 against $650.00 on PO-7001, a difference of $13.00, which is exactly 2%.
+document:
+  invoice_number: INV-6107
+  invoice_date: "2026-09-01"
+  lines:
+    - {description: "Copy paper, letter (ream)", qty: 20, unit_price_cents: 3315}
+    - {description: "Toner cartridge, black", qty: 5, unit_price_cents: 3850}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6107
+                invoice_date: "2026-09-01"
+                po_id: PO-7001
+                total_cents: 85550
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 66300}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001. Paper is exactly 2% over the PO price, which the tolerance allows.
+              confidence: 0.9
+              evidence: [PO-7001]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6107, invoice_date: "2026-09-01", po_id: PO-7001, total_cents: 85550,
+       lines: [[item, "6100", 66300], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 85550, "2000": -85550}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

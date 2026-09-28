@@ -1,0 +1,11 @@
+id: R08
+title: Revert the A04 credit memo after it was approved and applied
+extends: A04
+# A credit is reverted with a reversing entry, and P-2's credited amount goes back to zero.
+steps: [upload, process, {approve: approve}, revert]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "revert:REVERTED"]
+  audits: [[apply_credit_memo, approval, reverted]]
+  ledger_entries_added: 2
+  ledger_net: {"2000": 0, "6100": 0}

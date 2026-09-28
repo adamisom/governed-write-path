@@ -1,0 +1,17 @@
+id: D09
+title: The processing event for the C01 run is delivered a second time after the run finished
+extends: C01
+# The async self-invocation can be retried. A run that is already finalized returns its stored outcome and calls no
+# model again.
+steps: [upload, process, process]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED", "process:APPLIED"]
+  model_calls: 2
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-101, invoice_number: INV-6001, invoice_date: "2026-08-03", po_id: PO-7001, total_cents: 84250,
+       lines: [[item, "6100", 65000], [item, "6100", 19250]]}
+  ledger_entries_added: 1
+  ledger_net: {"6100": 84250, "2000": -84250}
+  receipts: {"PO-7001#1": 20, "PO-7001#2": 5}

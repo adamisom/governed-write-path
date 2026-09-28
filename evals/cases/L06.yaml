@@ -1,0 +1,14 @@
+id: L06
+title: The proposer answers in text and never calls propose_write, twice
+extends: C01
+offline_only: true
+runs:
+  - cooperative:
+      proposer:
+        - {text: "This invoice matches PO-7001 and can be posted."}
+        - {text: "It matches PO-7001. Please post it."}
+expect:
+  final_outcome: NEEDS_HUMAN
+  trail: ["process:NEEDS_HUMAN"]
+  reason: invalid_proposal
+  model_calls: 3

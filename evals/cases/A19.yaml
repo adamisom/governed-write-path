@@ -1,0 +1,58 @@
+id: A19
+title: A credit memo against INV-6001 after that payable was reversed; the approver approves and the write fails
+extends: C01
+# In setup the C01 invoice posts and is reverted. The credit memo then cites it. Credit memos always need approval,
+# and the check lists that the payable is not open. When the approver approves, the executor's transaction requires
+# an open payable, so the write fails, is audited as failed, and the run goes to a person. Nothing changes.
+document:
+  kind: credit_memo
+  invoice_number: CM-42
+  invoice_date: "2026-09-14"
+  po_number: null
+  remit_to_bank_last4: null
+  referenced_invoice_numbers: [INV-6001]
+  lines:
+    - {description: "Toner cartridge, black (returned)", qty: 2, unit_price_cents: 3850}
+documents:
+  earlier:
+    kind: invoice
+    invoice_number: INV-6001
+    invoice_date: "2026-08-03"
+    po_number: PO-7001
+    remit_to_bank_last4: "4821"
+    referenced_invoice_numbers: []
+    lines:
+      - {description: "Copy paper, letter (ream)", qty: 20, unit_price_cents: 3250}
+      - {description: "Toner cartridge, black", qty: 5, unit_price_cents: 3850}
+setup: [{upload: earlier}, process, revert]
+steps: [upload, process, {approve: approve}]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6001
+                invoice_date: "2026-08-03"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001 line for line, and both lines are fully received.
+              confidence: 0.95
+              evidence: [PO-7001]
+  - cooperative:
+      proposer:
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: CM-42, payable_id: P-1001, amount_cents: 7700}
+              rationale: The memo cites INV-6001, posted as P-1001, which the records show as reversed.
+              confidence: 0.7
+              evidence: [P-1001]
+expect:
+  final_outcome: NEEDS_HUMAN
+  trail: ["process:PENDING_APPROVAL", "approve:failed"]
+  reason: payable_not_open
+  audits: [[apply_credit_memo, approval, failed]]

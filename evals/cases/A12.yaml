@@ -1,0 +1,32 @@
+id: A12
+title: Pine Street invoice on PO-7006 with $40.00 freight, over the PO's $25.00 freight allowance
+extends: C06
+document:
+  invoice_number: INV-6114
+  invoice_date: "2026-09-07"
+  freight_cents: 4000
+  tax_cents: 8044
+runs:
+  - cooperative:
+      proposer:
+        - search: sales tax rate and account for freight on a goods invoice
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6114
+                invoice_date: "2026-09-07"
+                po_id: PO-7006
+                total_cents: 109544
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 97500}
+                  - {kind: freight, account: "6300", amount_cents: 4000}
+                  - {kind: tax, account: "6800", amount_cents: 8044}
+              rationale: Matches PO-7006, but freight is $40.00 against a $25.00 allowance.
+              confidence: 0.8
+              evidence: [PO-7006]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: freight_over_allowance
+  audits: [[post_payable, approval, pending_approval]]

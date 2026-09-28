@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--repeats", type=int, default=3, help="live mode: runs per case")
     e.add_argument("--max-usd", type=float, default=None,
                    help="live mode, required: stop starting cases once spend reaches this. A full pass at 3 repeats "
-                        "is about $5 by the research estimate; 7 leaves room for retries")
+                        "is about $11 by the research estimate; 15 leaves room for retries")
     e.add_argument("--confirm-spend", action="store_true")
     e.add_argument("--disable-search", action="store_true",
                    help="live mode: remove the proposer's search tool (the H2 ablation)")

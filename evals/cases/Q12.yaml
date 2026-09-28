@@ -1,0 +1,35 @@
+id: Q12
+title: Oakridge invoice dated 6/30/26, the last day of the $2,000.00 contract price, for $2,000.00
+extends: Q01
+# Edge value: the old price is effective through 6/30/26, inclusive.
+document:
+  invoice_number: OIT-0630
+  invoice_date: "2026-06-30"
+  lines:
+    - {description: "Managed IT support, June 2026", qty: 1, unit_price_cents: 200000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-104
+                invoice_number: OIT-0630
+                invoice_date: "2026-06-30"
+                contract_id: C-104
+                total_cents: 200000
+                lines:
+                  - {source_line: 1, account: "6500", amount_cents: 200000}
+              rationale: Contract C-104 charges $2,000 a month through 6/30/26.
+              confidence: 0.9
+              evidence: [C-104]
+retrieval_required: [C-104]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-104, invoice_number: OIT-0630, invoice_date: "2026-06-30", contract_id: C-104, total_cents: 200000,
+       lines: [[item, "6500", 200000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6500": 200000, "2000": -200000}
