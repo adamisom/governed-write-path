@@ -23,11 +23,6 @@ mcp = [
     "mcp>=2.1,<2.2",
     "opentelemetry-sdk>=1.45",
 ]
-agent = [
-    "langchain-core>=1.6.5",
-    "langchain[mcp]>=1.4.2",
-    "langgraph>=1.2.12",
-]
 
 [project.scripts]
 gwp = "gwp.cli:main"
