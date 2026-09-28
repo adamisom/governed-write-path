@@ -119,16 +119,20 @@ def handler(event: dict, context: Any = None) -> dict:
     if event.get("source") == "gwp.staleness":
         orch = _orchestrator()
         stranded = orch.recover_stranded()  # first, so records it finishes don't show as stale
+        # Then the runs of stale proposed or approved records, which no lease covers (DECISIONS entry 47).
+        stale_runs = orch.resume_stale()
         stale = orch.stale()
         errors = [r for r in stranded if r.get("error")]
+        stale_errors = [r for r in stale_runs if r.get("error")]
         # CloudWatch picks these lines up; an alarm can watch them.
-        print(json.dumps({"stranded_runs_resumed": stranded, "stale_audit_records": stale,
-                          "stranded_errors": len(errors)}))
-        if errors:
+        print(json.dumps({"stranded_runs_resumed": stranded, "stale_runs_resumed": stale_runs,
+                          "stale_audit_records": stale, "stranded_errors": len(errors),
+                          "stale_run_errors": len(stale_errors)}))
+        if errors or stale_errors:
             # Every other run was resumed and the stale list printed; fail the invocation so the Errors metric
             # shows a run the sweep can't finish, instead of a quiet success every 15 minutes.
-            raise RuntimeError(f"{len(errors)} stranded run(s) could not be resumed: "
-                               + ", ".join(f"{r['tenant_id']}/{r['run_id']}" for r in errors))
+            raise RuntimeError(f"{len(errors) + len(stale_errors)} run(s) could not be resumed: "
+                               + ", ".join(f"{r['tenant_id']}/{r['run_id']}" for r in errors + stale_errors))
         return {"stale": len(stale), "stranded": len(stranded) - len(errors)}
 
     auth = _principal(event.get("headers") or {})

@@ -954,6 +954,11 @@ class Orchestrator:
              "decline_note": (note or "")[:500]}, terminal=(to == AuditStatus.declined))
         if not ok:
             current = self.store.get_audit(tenant_id, audit_id) or {}
+            if current.get("status") == AuditStatus.approved:
+                # The worker died after the approval and before the apply. The run is finalized, so it has no lease
+                # and the sweep never visits it; the approver's retry applies what was approved (entry 47).
+                self.executor.apply(tenant_id, audit_id)
+                current = self.store.get_audit(tenant_id, audit_id) or {}
             # A retry after a crash between the write and the run update repairs the run's outcome (case D12).
             outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
             return DecisionResult("already_decided", audit_id, outcome, detail=current.get("status"))
@@ -1038,3 +1043,29 @@ class Orchestrator:
         cutoff = (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S")
         return [{"tenant_id": a["tenant_id"], "audit_id": a["audit_id"], "status": a["status"],
                  "since": a["open_since"]} for a in self.store.list_open_audits(cutoff)]
+
+    def resume_stale(self, now_iso: str | None = None, minutes: int = 15) -> list[dict]:
+        """Resume the run of every stale record that is `proposed` or `approved`, once per run (entry 47).
+
+        A finalized run has no lease, so `recover_stranded` never visits it. Without this, three states were left
+        for good: an `approved` record whose worker died before the apply, an auto record left at `proposed` when
+        the fail-closed handler finalized its run after an earlier write of the set committed, and a `proposed`
+        record on a finalized run whose set was never fully recorded, which `resume` closes as failed. `resume` is
+        idempotent, and a record waiting for a person (`pending_approval`) is left alone.
+        """
+        runs: dict[tuple[str, str], None] = {}
+        for row in self.stale(now_iso, minutes):
+            if row["status"] not in (AuditStatus.proposed, AuditStatus.approved):
+                continue
+            audit = self.store.get_audit(row["tenant_id"], row["audit_id"]) or {}
+            if audit.get("run_id") and audit.get("status") in (AuditStatus.proposed, AuditStatus.approved):
+                runs.setdefault((row["tenant_id"], audit["run_id"]), None)
+        out = []
+        for tenant_id, run_id in runs:
+            row = {"tenant_id": tenant_id, "run_id": run_id}
+            try:
+                row["outcome"] = self.resume(tenant_id, run_id).outcome
+            except Exception as exc:  # noqa: BLE001 - one run that can't be resumed must not stop the others
+                row["outcome"], row["error"] = None, repr(exc)[:300]
+            out.append(row)
+        return out

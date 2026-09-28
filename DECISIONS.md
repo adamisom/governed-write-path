@@ -279,6 +279,7 @@ Source: changed after the audit (finding 4, and lows 9, 14 and 19).
 - **Claiming a run.** `process` claims the run with a conditional update from `received`, so two workers that both read `received` can't both call the models. A call on a run another worker holds returns `IN_PROGRESS`, never stored as an outcome.
 - **Gap found later.** Nothing called `resume` on its own, and a worker killed after the claim and before step 9 left no audit record for the staleness check to find. Entry 41 adds a lease and a sweep.
 - **Left as is.** A set that ends with one write applied and one declined still reports `DECLINED`. The applied write is listed on the run.
+- **Later.** Entry 47 corrects when `resume` runs on a finalized run.
 
 ## 34. Recode and hold have eval cases, and the grader diffs holds and invoice dates
 
@@ -376,6 +377,7 @@ Source: planning the case expansion (case D12), 9/28.
 - **Choice.** The `already_decided` branch also calls `_refresh_run_outcome`, which recomputes the outcome from the run's audit records and is safe to repeat, and returns it.
 - **Alternative.** Give a run waiting for approval a lease, so the sweep repairs it. That adds a lease that would expire for every approval a person takes more than an hour on, for a gap that the approver's own retry closes.
 - **Why.** The retry is how a client learns what happened after a crash, so it should leave the run correct. The fix changes no write and no tier.
+- **Later.** The retry repaired the label after a crash that followed the apply, and not a crash before it. Entry 47 makes the retry apply an approved write.
 
 ## 46. The eval set grows from 53 to 108 cases, each written before its first run
 
@@ -478,3 +480,21 @@ Source: an independent audit on the Fable model of main at `8356cdb`, focused on
 - **The sweep's handler hid a run it could never resume (low-medium).** The scheduled handler now counts such runs apart, prints the count, and fails the invocation so the error metric shows it.
 - **Smaller items (low).** The fail-closed handler no longer rewrites a run the sweep already finished and only adds the late worker's error; the size fallback keeps the extraction and the original error; the sweep re-reads each run and skips one whose lease was renewed after the index listed it; ids are checked with a full match, so a trailing newline doesn't pass; the work list leaves out runs past their deadline; a failed park returns the run's state; and the middleware records a malformed tool name as such.
 - **Left open (low).** A worker that dies while closing the records of a lost claim leaves a record at `proposed` on a finalized run. The staleness check lists it, but nothing closes it. The built-in path has the same kind of gap between writing records and moving the run to `audited`, and the staleness handler work on main is the place to close both.
+
+# Changes after the second audit
+
+A second independent audit on 9/28/26 (`governed-write-path-notes/fable-audit-2.md`) found 1 high, 5 medium and 4 low findings. The entries below record what changed because of it. `governed-write-path-notes/audit-2-fixes.md` maps each finding to its commit and test.
+
+## 47. The staleness sweep resumes finalized runs, and a retried approval applies what was approved
+
+Source: second Fable audit, 9/28/26 (GWP2-1), and finding F6 of the MCP branch's audit.
+
+- **Before.** Entry 33 said `resume` finishes a set on a finalized run or not, and entry 45 said the approver's own retry closes the gap for a run waiting for approval. Both were true of the function and false of the service. The service called `resume` only for a run whose lease ran out, and a finalized run has no lease, so these states were never repaired:
+  - An approved write whose worker died after the record moved to `approved` and before the apply. The approver's retry answered `already_decided`, and the run said PENDING_APPROVAL for good.
+  - An auto write left at `proposed` after an ordinary exception on an earlier apply of the set. The fail-closed handler finalized the run as NEEDS_HUMAN, and no task was opened.
+  - A record left at `proposed` on a finalized run whose set was never fully recorded (the MCP audit's F6). A worker that outlived its lease lost the move to `audited` and died while closing its records.
+- **Evidence.** The audit's reproductions A1 and A2 show the first two. After each, `recover_stranded` returned nothing, a redelivered event returned the stored outcome, and only a manual `resume` applied the write. A test builds the third by letting the sweep finalize a run between the worker's two audit puts.
+- **Choice.** In `approve`, the `already_decided` branch applies the record first when its status is `approved`, and then refreshes the outcome. The scheduled `gwp.staleness` event now also calls `resume_stale`, which runs `resume` once on the run of every stale record at `proposed` or `approved`. `resume` applies what may apply and closes as failed a `proposed` record whose set was incomplete. A stale record at `pending_approval` is left alone, since it is waiting for a person.
+- **Alternative.** Keep the lease on a run that `_fail_closed` finalizes while any of its records is not terminal. That covers the exception after a commit, but not the approved record, whose run was finalized when it went to approval. Entry 45 already rejected a lease for runs waiting for approval.
+- **Why.** `resume` is idempotent, and every status change in it is a compare-and-set, so running it on a finished run changes nothing. A stale record is at least 15 minutes old, which is longer than a lease, so no live worker can still hold its run.
+- **Supersedes.** What entries 33 and 45 say about when `resume` runs. On a finalized run it now runs from the staleness sweep, and an approved record is also applied by the approver's retry.
