@@ -39,7 +39,7 @@ from opentelemetry import trace
 
 from .access import TOOL_ROLES, AccessDenied, AccessLog, Caller, caller_from_key
 from .orchestrator import InvalidDecision, NotAllowed, NotAwaitingProposal, Orchestrator
-from .schema import ProposalSet, Role
+from .schema import FORBIDDEN_ACTIONS, ProposalSet, Role
 
 CallerResolver = Callable[[], Caller]
 
@@ -105,21 +105,36 @@ def _span(**attrs: Any) -> None:
             span.set_attribute(f"gwp.{k}", v if isinstance(v, (str, int, float, bool)) else str(v))
 
 
-_ID = re.compile(r"^[A-Za-z0-9#._/-]{1,40}$")
+_ID = re.compile(r"[A-Za-z0-9#._/-]{1,40}")  # used with fullmatch, so a trailing newline doesn't pass
 
 
-def _agent_safe(value: Any) -> Any:
-    """Numbers, booleans, and strings with no spaces of at most 40 characters (ids, dates, codes). Anything else,
-    which could carry a sentence from a document or a model, is left out."""
-    if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
-        return value
-    if isinstance(value, str):
-        return value if _ID.match(value) else "<text withheld>"
-    if isinstance(value, list):
-        return [_agent_safe(v) for v in value[:20]]
-    if isinstance(value, dict):
-        return {k: _agent_safe(v) for k, v in list(value.items())[:30] if isinstance(k, str) and _ID.match(k)}
-    return "<text withheld>"
+# The parameter keys an agent may see in another run's audit record: ids, dates, amounts, accounts and codes. Invoice
+# and credit numbers and vendor query fields are the supplier's text, and `_render_records` keeps them from the
+# built-in proposer too.
+_AGENT_PARAM_KEYS = {"vendor_id", "po_id", "contract_id", "payable_id", "document_id", "invoice_date", "total_cents",
+                     "amount_cents", "account", "line_no", "lines", "kind", "source_line", "po_line_no", "template_id",
+                     "reason_code"}
+
+
+def _agent_params(action: str, params: Any) -> dict:
+    """A proposal's parameters as an agent may see them. A forbidden action's parameters are free-form by design
+    (so the attempt is recorded), so none are shown; otherwise only allowlisted keys with id-shaped or numeric
+    values."""
+    if action in FORBIDDEN_ACTIONS or not isinstance(params, dict):
+        return {}
+
+    def keep(value: Any) -> Any:
+        if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
+            return value
+        if isinstance(value, str):
+            return value if _ID.fullmatch(value) else "<text withheld>"
+        if isinstance(value, list):
+            return [keep(v) for v in value[:50]]
+        if isinstance(value, dict):
+            return {k: keep(v) for k, v in value.items() if k in _AGENT_PARAM_KEYS}
+        return "<text withheld>"
+
+    return {k: keep(v) for k, v in params.items() if k in _AGENT_PARAM_KEYS}
 
 
 def _run_summary(run: dict, for_agent: bool) -> dict[str, Any]:
@@ -143,7 +158,7 @@ def _audit_summary(a: dict, for_agent: bool) -> dict[str, Any]:
            "decided_by": a.get("decided_by"), "decision": a.get("decision"),
            "history": [{"state": h.get("state"), "at": h.get("at")} for h in a.get("history", [])]}
     if for_agent:
-        out["params"] = _agent_safe(a["params"])
+        out["params"] = _agent_params(a["action"], a["params"])
     else:
         out["params"] = a["params"]
         out["decline_note"] = a.get("decline_note")
@@ -184,7 +199,8 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
             _CALL.reset(token)
             if not holder["recorded"]:
                 params = ctx.params if isinstance(ctx.params, dict) else {}
-                name = str(params.get("name"))[:64]
+                raw_name = str(params.get("name"))
+                name = raw_name if _ID.fullmatch(raw_name) else "<malformed tool name>"
                 reason = ("arguments failed the tool's input schema" if name in TOOL_ROLES
                           else f"no tool named {name!r}")
                 try:
@@ -199,7 +215,7 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
 
     def guard(tool: str, **targets: str) -> Caller:
         caller = resolve_caller()
-        bad = {k: v for k, v in targets.items() if v is not None and not _ID.match(v)}
+        bad = {k: v for k, v in targets.items() if v is not None and not _ID.fullmatch(v)}
         _span(tenant_id=caller.tenant_id, role=caller.principal.role.value, principal_id=caller.principal.principal_id,
               **{k: v for k, v in targets.items() if k not in bad})
         holder = _CALL.get()

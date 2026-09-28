@@ -291,7 +291,8 @@ def test_a_run_record_too_large_to_store_in_full_is_still_finalized(store, monke
     out = orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT)
     run = store.get_run("T1", res.run_id)
     assert out.outcome == "APPLIED" and run["state"] == "finalized" and "lease_flag" not in run
-    assert run["error"] == "run record too large to store in full"
+    assert run["size_note"] == "run record too large to store in full"
+    assert run["extraction"]["invoice_number"] == "INV-6001"  # an approver's view still has the document's fields
 
 
 def test_validation_feedback_never_echoes_the_proposals_own_words(store):
@@ -300,10 +301,87 @@ def test_validation_feedback_never_echoes_the_proposals_own_words(store):
     out = orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post(**{planted: 1})]}, AGENT)
     assert out.outcome == "AWAITING_PROPOSAL" and "<extra field>" in out.detail
     assert planted not in out.detail
-    assert planted not in (store.get_run("T1", res.run_id).get("retry_feedback") or "")
-    # A redelivered processing event reports a closed reason, and the feedback only as detail.
+    # Nor through an unknown action, whose pydantic message quotes the tag.
+    from pydantic import ValidationError
+
+    from gwp.orchestrator import validation_feedback
+    from gwp.schema import ProposalSet
+
+    with pytest.raises(ValidationError) as ve:
+        ProposalSet.model_validate({"proposals": [{"action": planted, "params": {}}]})
+    assert planted in str(ve.value)  # pydantic's own message quotes it
+    words = validation_feedback(ve.value)
+    assert planted not in words and "not an allowed action" in words
+    run = store.get_run("T1", res.run_id)
+    assert planted not in repr(run.get("retry_feedback")) and planted not in repr(run["proposal_attempts"][0]["error"])
+
+
+def test_a_parked_run_reports_a_closed_reason_and_the_feedback_only_as_detail(store):
+    orch, res, _ = parked(store)
+    orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post(params={"po_id": "PO-9999"})]}, AGENT)
     again = orch.process("T1", res.run_id)
-    assert (again.outcome, again.reason) == ("AWAITING_PROPOSAL", "invalid_proposal")
+    assert (again.outcome, again.reason) == ("AWAITING_PROPOSAL", "invalid_proposal") and "PO-9999" in again.detail
+
+
+def test_a_second_invalid_proposal_opens_a_task_for_a_person(store):
+    orch, res, _ = parked(store)
+    for _ in range(2):
+        orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["invalid_proposal"]
+
+
+def test_a_search_between_the_first_read_and_the_claim_is_kept(store, monkeypatch):
+    orch, res, _ = parked(store, A01_DOC)
+    real = store.update_run
+    done = []
+
+    def update_run(tenant_id, run_id, fields, history=None, expect_state=None):
+        if fields.get("state") == "proposing" and not done:
+            done.append(1)
+            orch.search_policy("T1", run_id, "furniture over $1,000", AGENT)  # lands just before the claim
+        return real(tenant_id, run_id, fields, history, expect_state)
+
+    monkeypatch.setattr(store, "update_run", update_run)
+    orch.submit_proposal("T1", res.run_id, {"proposals": [a01_post()]}, AGENT)
+    run = store.get_run("T1", res.run_id)
+    assert [s["query"] for s in run["searches"]] == ["furniture over $1,000"]
+    (audit,) = store.list_audits("T1", res.run_id)
+    assert any(r["kind"] == "policy_chunk" for r in audit["retrieved"])
+
+
+def test_a_worker_that_fails_after_the_sweep_finished_its_run_keeps_the_sweeps_outcome(store, monkeypatch):
+    orch, res, clock = parked(store)
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    def boom(*a, **k):
+        clock.advance(RUN_LEASE_SECONDS + 30)
+        orch.recover_stranded()
+        raise RuntimeError("worker failed late")
+
+    monkeypatch.setattr(orch, "_validate_proposal", boom)
+    orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT)
+    run = store.get_run("T1", res.run_id)
+    assert (run["outcome"], run["reason"]) == ("NEEDS_HUMAN", "interrupted") and "worker failed late" in run[
+        "late_worker_error"]
+    assert [h["state"] for h in run["history"]].count("finalized_on_resume") == 1
+    assert not any(h["state"].startswith("finalized:") for h in run["history"])
+
+
+def test_the_sweep_skips_a_run_whose_lease_was_renewed_after_the_index_listed_it(store, monkeypatch):
+    orch, res, clock = parked(store)
+    clock.advance(PROPOSAL_LEASE_SECONDS + 60)
+    listed = store.list_expired_leases(clock.now())
+    store.update_run("T1", res.run_id, {"lease_until": "2999-01-01T00:00:00.000000Z"})
+    monkeypatch.setattr(store, "list_expired_leases", lambda now: listed)
+    assert orch.recover_stranded() == []
+    assert store.get_run("T1", res.run_id)["state"] == "awaiting_proposal"
+
+
+def test_work_past_its_deadline_is_not_listed(store):
+    orch, res, clock = parked(store)
+    assert orch.awaiting_proposals("T1", AGENT)
+    clock.advance(PROPOSAL_LEASE_SECONDS + 60)
+    assert orch.awaiting_proposals("T1", AGENT) == []
 
 
 def _sweep_during(orch, clock, monkeypatch):

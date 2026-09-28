@@ -143,6 +143,15 @@ def _type_args(tp) -> list:
 
 
 _PROPOSAL_FIELDS = _schema_field_names(ProposalSet)
+_FEEDBACK_WORDS = {
+    "missing": "is required", "extra_forbidden": "is not allowed", "union_tag_invalid": "is not an allowed action",
+    "union_tag_not_found": "needs an action", "literal_error": "is not an allowed value",
+    "string_pattern_mismatch": "does not match the required format", "string_too_long": "is too long",
+    "string_too_short": "is too short", "too_long": "has too many items", "too_short": "has too few items",
+    "greater_than": "is too small", "greater_than_equal": "is too small", "less_than": "is too large",
+    "less_than_equal": "is too large", "_type": "has the wrong type", "_parsing": "has the wrong type",
+    "date_from_datetime_parsing": "is not a date", "value_error": "is not valid",
+}
 
 
 def validation_feedback(ve: ValidationError) -> str:
@@ -156,7 +165,12 @@ def validation_feedback(ve: ValidationError) -> str:
     parts = []
     for err in ve.errors()[:5]:
         loc = ".".join(str(x) if isinstance(x, int) or x in known else "<extra field>" for x in err["loc"])
-        parts.append(f"{loc}: {err['msg']}"[:200])
+        # Pydantic's own messages can quote the input (e.g. an unknown action tag), so the words are chosen here from
+        # the error type, and an unfamiliar type is named by its code.
+        kind = err["type"]
+        words = _FEEDBACK_WORDS.get(kind) or next((w for k, w in _FEEDBACK_WORDS.items() if kind.endswith(k)),
+                                                   f"is invalid ({kind})")
+        parts.append(f"{loc}: {words}"[:200])
     return "; ".join(parts)[:600]
 
 
@@ -258,6 +272,10 @@ class Orchestrator:
         audits = self.store.list_audits(tenant_id, run_id)
         applied = [a["audit_id"] for a in audits if a["status"] == "applied"]
         current = self.store.get_run(tenant_id, run_id) or {}
+        if current.get("state") == "finalized":
+            # Someone else, e.g. the sweep, already finished the run. Keep their outcome and add the error.
+            self.store.update_run(tenant_id, run_id, {"late_worker_error": repr(exc)[:500]})
+            return self._current(current)
         if current.get("route") == "human":
             # Step 10 may have closed the routed records and then failed to open the task. Open it before the
             # run is finalized: finalizing drops the lease, and closed records are not open, so nothing else
@@ -465,7 +483,7 @@ class Orchestrator:
                   "prepare_latency_ms": int((self.clock.monotonic() - t0) * 1000)}
         if not self.store.update_run(tenant_id, run_id, fields, ("awaiting_proposal", now),
                                      expect_state="text_extracted"):
-            return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
+            return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, None)
 
     @staticmethod
@@ -492,7 +510,9 @@ class Orchestrator:
     def awaiting_proposals(self, tenant_id: str, principal: Principal) -> list[dict]:
         """The agent's work queue: this tenant's runs parked for a proposal, oldest first."""
         self._require_agent(principal)
-        runs = [r for r in self.store.list_runs(tenant_id) if r.get("state") == "awaiting_proposal"]
+        now = self.clock.now()
+        runs = [r for r in self.store.list_runs(tenant_id)
+                if r.get("state") == "awaiting_proposal" and not (r.get("lease_until") and r["lease_until"] < now)]
         return [{"run_id": r["run_id"], "document_id": r["document_id"], "started_at": r["started_at"],
                  "proposal_deadline": r.get("lease_until")} for r in sorted(runs, key=lambda r: r["started_at"])]
 
@@ -550,6 +570,8 @@ class Orchestrator:
                                                          "lease_until": iso_plus(now, RUN_LEASE_SECONDS)},
                                      ("proposing", now), expect_state="awaiting_proposal"):
             return self._current(self.store.get_run(tenant_id, run_id) or run)
+        # Read the run again now that it's claimed: a search can land between the first read and the claim.
+        run = self.store.get_run(tenant_id, run_id) or run
         t0 = self.clock.monotonic() - run.get("prepare_latency_ms", 0) / 1000
         trace: dict = {k: list(run.get(k) or []) for k in ("model_calls", "retrieved", "searches", "proposal_attempts")}
         trace["extraction"], trace["extraction_flags"] = run["extraction"], list(run.get("extraction_flags") or [])
@@ -621,6 +643,9 @@ class Orchestrator:
                     # The sweep finished the run while this proposal was checked; say what it decided.
                     return self._current(self.store.get_run(tenant_id, run_id) or run)
                 return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, "invalid_proposal", detail=feedback)
+            # The task first, as everywhere else: finalizing drops the lease, so a crash between leaves a leased run
+            # the sweep finishes, never a finalized run with no task.
+            self._open_task(tenant_id, run_id, "invalid_proposal")
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "invalid_proposal", trace, t0,
                                 expect_state="proposing")
         return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
@@ -809,8 +834,9 @@ class Orchestrator:
             # The full record would pass DynamoDB's item size limit. Finalize with the outcome only, so the run
             # still ends and leaves the sweep's index; the audit records keep the detail.
             small = {k: fields[k] for k in ("state", "outcome", "reason", "ended_at", "latency_ms", "audit_ids",
-                                            "applied_audit_ids")}
-            small["error"] = "run record too large to store in full"
+                                            "applied_audit_ids", "extraction", "extraction_flags", "error")
+                     if k in fields}
+            small["size_note"] = "run record too large to store in full"
             if not self.store.update_run(tenant_id, run_id, small, history, expect_state=expect_state):
                 return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         return RunResult(run_id, outcome, reason, audit_ids or [])
@@ -996,6 +1022,10 @@ class Orchestrator:
         for run in self.store.list_expired_leases(now):
             row = {"tenant_id": run["tenant_id"], "run_id": run["run_id"], "state": run["state"],
                    "lease_until": run["lease_until"]}
+            # The index is eventually consistent; a worker may have renewed its lease since. Read the run itself.
+            fresh = self.store.get_run(run["tenant_id"], run["run_id"]) or {}
+            if fresh.get("lease_until") and fresh["lease_until"] >= now:
+                continue
             try:
                 row["outcome"] = self.resume(run["tenant_id"], run["run_id"]).outcome
             except Exception as exc:  # noqa: BLE001 - one run that can't be resumed must not stop the others
