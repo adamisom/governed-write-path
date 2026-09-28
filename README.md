@@ -99,6 +99,36 @@ uv run gwp eval --mode live --provider bedrock --region us-east-1 --confirm-spen
 
 The defaults are Claude Haiku 4.5 as the reader and Claude Sonnet 5 as the proposer. `--reader-model` and `--proposer-model` override them, `--repeats` sets the runs per case (default 3), and `--disable-search` removes the proposer's search tool for the retrieval ablation.
 
+## The MCP server
+
+The write path also runs as an [MCP](https://modelcontextprotocol.io) server, so an outside agent can be the proposer. The orchestrator runs in external-proposal mode: an uploaded document is read by the quarantined reader and its records are looked up, and then the run waits for an agent's proposal instead of calling the built-in proposer. The agent gets exactly what the built-in proposer would be shown, the typed fields labeled untrusted and the records code looked up, and never the document text. Its proposal goes through the same validation, policy check, tier, audit record and transaction. An invalid proposal gets the errors back and one more try, a repeated proposal changes nothing, and a run nobody proposes for within an hour goes to a person.
+
+Each write verb belongs to one role, and the role comes from the caller's key, never from a tool argument:
+
+| Tool | agent | approver | admin |
+| --- | --- | --- | --- |
+| `list_work`, `get_proposal_context`, `search_policy`, `propose` | yes | no | no |
+| `list_pending_approvals`, `get_approval_view`, `decide` | no | yes | no |
+| `revert` | no | no | yes |
+| `get_run`, `list_runs`, `get_audit` | yes | yes | yes |
+
+Every tool call is recorded before it runs, allowed or denied, in an access record under the caller's tenant. A call whose record can't be written doesn't run. A denied call returns a tool error naming its access record and changes nothing else, which a test checks for every tool and role. The orchestrator's own role checks stay underneath as a second layer. The MCP SDK opens a trace span for every tool call, and the server adds the caller's role and tenant, the access decision, and the ids and outcome, never document or proposal text.
+
+Try it offline. The walkthrough seeds an in-process store, reads two invoices with a scripted reader, and serves them over streamable HTTP in the same process. An agent key proposes for both, an approver key approves the one over the auto limit, an admin key reverts it, and each role also tries a call it may not make:
+
+```sh
+uv run gwp mcp walkthrough
+```
+
+Or serve the demo and connect any MCP client. The demo keys are `demo-agent-key`, `demo-approver-key`, `demo-admin-key` and `demo-t2-agent-key` (an agent in the second tenant):
+
+```sh
+uv run gwp mcp serve --demo --transport http --port 8765   # clients send "Authorization: Bearer demo-agent-key"
+uv run gwp mcp serve --demo --transport stdio --key demo-agent-key
+```
+
+Without `--demo`, the server uses the DynamoDB tables, bucket and reader model from the same environment variables as the Lambda, and keys from `GWP_API_KEYS`. That path has never been run. The MCP SDK is pinned to 2.1.x, because Strands 1.57.0 requires `mcp<2.2`.
+
 ## The eval set
 
 There are 53 cases in `evals/cases/`, one YAML file each, with the rendered PDFs in `evals/documents/`. Each case states its document as data, the human steps (approve, decline, revert, repeat a request), any setup steps such as an earlier document that posts first, the scripted model turns for both scripts, and the expected outcome, written by hand from the policy before any run.
@@ -136,6 +166,9 @@ src/gwp/
   agents/          Reader and Proposer interfaces, Strands implementations, the scripted model, prompts
   evals/           document rendering, case loading, the runner, the grader, metrics and reports
   api.py           the Lambda handler
+  access.py        the MCP server's role rules, callers from keys, and the access record of every call
+  mcp_server.py    the MCP server: tools, role checks and span attributes
+  mcp_demo.py      the offline demo and walkthrough; mcp_cli.py is `gwp mcp`
 evals/cases/       the 53 case specs
 tests/             unit tests, the grader's own tests, and every case as a test
 ```

@@ -376,3 +376,53 @@ Source: planning the case expansion (case D12), 9/28.
 - **Choice.** The `already_decided` branch also calls `_refresh_run_outcome`, which recomputes the outcome from the run's audit records and is safe to repeat, and returns it.
 - **Alternative.** Give a run waiting for approval a lease, so the sweep repairs it. That adds a lease that would expire for every approval a person takes more than an hour on, for a gap that the approver's own retry closes.
 - **Why.** The retry is how a client learns what happened after a crash, so it should leave the run correct. The fix changes no write and no tier.
+
+# The MCP server (branch `mcp-server`)
+
+These entries are numbered M1 onward so they don't collide with entries added on main while the branch is open.
+
+## M1. The agent connected over MCP is the proposer, and the reader stays inside the server
+
+Source: planning the MCP server, 9/28.
+
+- **Context.** `process` ran every step in one call, with the built-in Strands proposer as step 6. An agent connected over MCP runs in its own process on its own schedule, so the orchestrator can't call it.
+- **Choice.** An external-proposal mode. `process` runs steps 2 to 5 and parks the run as `awaiting_proposal`, with the extraction and trace saved on the run and a lease of one hour. `proposal_context` returns what the built-in proposer would be shown, and a test checks the rendered prompt is identical. `search_policy` is the same tenant-bound search, logged on the run. `submit_proposal` claims the run with a conditional update and runs steps 7 to 12 through `_validate_proposal` and `_decide`, which the built-in path now calls too. If the lease runs out, the sweep ends the run as NEEDS_HUMAN with the reason `proposal_timeout`.
+- **Alternative.** Make the outside agent an uploader and keep the built-in proposer. The MCP agent would then only submit documents, and "the agent can only propose" would describe the Strands agent, not the one connected over MCP.
+- **Why.** The outside agent gets the same prompt-injection protection as the built-in proposer, since it never sees document text, and every rule that applies to a proposal is the same code.
+
+## M2. On the MCP server each write verb belongs to one role
+
+Source: planning the MCP server, 9/28.
+
+- **Context.** The orchestrator lets an admin approve and an approver revert.
+- **Choice.** `access.TOOL_ROLES` gives `propose` to the agent role, `decide` to the approver and `revert` to the admin, and the server checks it before anything runs. The orchestrator's checks stay underneath, and a test widens the server's rule on purpose to show the orchestrator still refuses and records the refusal.
+- **Why.** Separation of duties: the role that proposes a write can't approve it, and the role that approves it can't undo it.
+
+## M3. Every MCP call is recorded before it runs, in the records table
+
+Source: build, 9/28.
+
+- **Choice.** `AccessLog.check` writes an access record (tenant, principal, role, tool, decision, layer, target ids, and the reason for a denial) with a conditional put, and only then allows or denies the call. If the put fails, the call fails. Access records live under the caller's tenant in the records table.
+- **Alternative.** The audit table, which holds one record per proposed write. The grader reads every audit table item as a write, and the approval and staleness queries would have to filter access records out.
+- **Why.** "Every denied call gets an audit record" then holds by construction, and a test checks each cell of the role matrix for exactly one record and, for a denial, no other change.
+
+## M4. `propose` takes loosely typed proposals, and code validates them
+
+Source: build, 9/28.
+
+- **Choice.** The tool's input schema is a list of objects, and the full `ProposalSet` schema is in its description. `submit_proposal` validates.
+- **Alternative.** A strict input schema. The MCP SDK would reject a bad proposal before our code ran, so it would not be recorded as an attempt, would not get the one retry with feedback, and would not reach the injection metrics. This is the same reason as entry 10 for Strands.
+
+## M5. Identity comes from the key: a bearer token on HTTP, one key per process on stdio
+
+Source: build, 9/28.
+
+- **Choice.** On streamable HTTP, `KeyTableVerifier` checks each bearer token against the hashed key table the HTTP API uses and puts the principal, role and tenant in the token's claims, which the tool reads. An unknown key gets a 401 from the SDK before any tool runs. On stdio, `--key` or `GWP_MCP_API_KEY` names one caller for the process. Tests use one fixed caller per server over the SDK's in-memory client, and one test goes through HTTP.
+- **Why.** No tool takes a tenant or a role as an argument, so nothing a model writes can change them.
+
+## M6. The MCP SDK is pinned to 2.1.x
+
+Source: build, 9/28.
+
+- **Context.** `mcp` 2.2.0 is the latest (9/7/26), but Strands 1.57.0 requires `mcp>=1.23,<2.2`.
+- **Choice.** `mcp>=2.1,<2.2` in the optional `mcp` extra. 2.1.1 has the same server API (`MCPServer`), auth and built-in OpenTelemetry as 2.2.0 for everything used here.

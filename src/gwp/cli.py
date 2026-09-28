@@ -4,6 +4,8 @@
     gwp eval --mode offline --script adversarial
     gwp eval --mode live --provider anthropic --confirm-spend --max-usd 7
     gwp generate-docs
+    gwp mcp walkthrough                          the MCP server: propose, approve and revert, offline
+    gwp mcp serve --demo                         see gwp.mcp_cli
 """
 
 from __future__ import annotations
@@ -146,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     e.set_defaults(func=cmd_eval)
     g = sub.add_parser("generate-docs", help="render every case document to PDF and check it against its spec")
     g.set_defaults(func=cmd_generate)
+    from .mcp_cli import add_parser as add_mcp
+
+    add_mcp(sub)
     args = parser.parse_args(argv)
     return args.func(args)
 

@@ -19,8 +19,10 @@ tell a cross-tenant reference apart from a typo. It returns only the owner's id.
 
 Writes come in two groups:
 
-- Bookkeeping writes (documents, runs, audit records, human tasks) are methods
-  on this class and are called by the orchestrator.
+- Bookkeeping writes (documents, runs, audit records, human tasks, and the
+  MCP server's access records and agent memory) are methods
+  on this class and are called by the orchestrator, `gwp.access` and
+  `gwp.memory`.
 - Domain writes (payables, ledger entries, receipts, vendors, the outbox) go
   only through `transact_domain`, which runs one DynamoDB TransactWriteItems
   call. Only `gwp.executor` calls it, and a test checks that.
@@ -460,6 +462,22 @@ class DynamoStore:
 
     def list_human_tasks(self, tenant_id: str) -> list[dict]:
         return self._query(RECORDS, tenant_pk(tenant_id), "TASK#")
+
+    # -- access records (bookkeeping) ---------------------------------------
+
+    def put_access_record(self, record: dict) -> None:
+        """Append one record of a call to the MCP server, allowed or denied. Never overwritten.
+
+        Access records live in the records table under the caller's tenant, apart from the audit table, which
+        holds one record per proposed write.
+        """
+        item = {"pk": tenant_pk(record["tenant_id"]), "sk": f"ACCESS#{record['at']}#{record['access_id']}",
+                "kind": "access_record", **record}
+        self.client.put_item(TableName=self.tables[RECORDS], Item=serialize_item(item),
+                             ConditionExpression="attribute_not_exists(pk)")
+
+    def list_access_records(self, tenant_id: str) -> list[dict]:
+        return self._query(RECORDS, tenant_pk(tenant_id), "ACCESS#")
 
     # -- audit records (bookkeeping) ----------------------------------------
 

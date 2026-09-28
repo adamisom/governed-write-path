@@ -53,3 +53,24 @@ def test_pytest_q_still_prints_the_pass_count():
                           "tests/test_boundaries.py", "-k", "not pytest_q"], cwd=root, capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "passed" in out.stdout.splitlines()[-1], out.stdout
+
+
+FRAMEWORKS = {"strands", "mcp", "langchain", "langchain_core", "langgraph", "opentelemetry", "fastmcp"}
+
+
+def test_the_write_path_and_the_access_rules_import_no_agent_or_protocol_framework():
+    """The MCP server and the planner sit outside the write path. Nothing inside it depends on them."""
+    for rel in WRITE_PATH + ["access.py"]:
+        tree = ast.parse((SRC / rel).read_text())
+        for node in ast.walk(tree):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                [node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0 else [])
+            assert not any(n.split(".")[0] in FRAMEWORKS for n in names), (rel, names)
+
+
+def test_the_mcp_server_writes_only_through_the_orchestrator_and_the_access_log():
+    tree = ast.parse((SRC / "mcp_server.py").read_text())
+    writes = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and n.func.attr.startswith(("put_", "update_", "transition_", "append_", "open_", "finalize_",
+                                          "create_", "transact_", "seed"))}
+    assert writes == set()
