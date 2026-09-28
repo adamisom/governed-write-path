@@ -161,3 +161,22 @@ def test_the_scheduled_staleness_event_fails_when_a_stale_run_cannot_be_resumed(
             api.handler({"source": "gwp.staleness"})
     finally:
         api.set_orchestrator_factory(None)
+
+
+# -- GWP2-2: an approver's call on a routed or rejected record rewrote the run's outcome -----------------------------
+
+
+def test_an_approval_call_on_a_routed_record_leaves_the_run_routed(store):
+    orch, res, _, _ = run_doc(store, C01_DOC, [
+        c01_post(), {"action": "schedule_payment", "params": {}, "rationale": "x", "confidence": 0.9}])
+    assert (res.outcome, res.reason) == ("ROUTED_TO_HUMAN", "forbidden_action")
+    before = store.get_run("T1", res.run_id)
+    by_action = {a["action"]: a for a in store.list_audits("T1", res.run_id)}
+    assert by_action["post_payable"]["status"] == "routed" and by_action["schedule_payment"]["status"] == "rejected"
+    for action in ("post_payable", "schedule_payment"):
+        d = orch.approve("T1", by_action[action]["audit_id"], APPROVER, "approve")
+        assert (d.status, d.run_outcome) == ("already_decided", "ROUTED_TO_HUMAN")
+    after = store.get_run("T1", res.run_id)
+    assert (after["outcome"], after["reason"]) == ("ROUTED_TO_HUMAN", "forbidden_action")
+    assert after["history"] == before["history"]
+    assert len(store.list_payables("T1", "V-101")) == 1

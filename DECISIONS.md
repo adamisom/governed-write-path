@@ -498,3 +498,12 @@ Source: second Fable audit, 9/28/26 (GWP2-1), and finding F6 of the MCP branch's
 - **Alternative.** Keep the lease on a run that `_fail_closed` finalizes while any of its records is not terminal. That covers the exception after a commit, but not the approved record, whose run was finalized when it went to approval. Entry 45 already rejected a lease for runs waiting for approval.
 - **Why.** `resume` is idempotent, and every status change in it is a compare-and-set, so running it on a finished run changes nothing. A stale record is at least 15 minutes old, which is longer than a lease, so no live worker can still hold its run.
 - **Supersedes.** What entries 33 and 45 say about when `resume` runs. On a finalized run it now runs from the staleness sweep, and an approved record is also applied by the approver's retry.
+
+## 48. An approval call on a record that never went to approval leaves the run alone
+
+Source: second Fable audit, 9/28/26 (GWP2-2).
+
+- **Before.** Entry 45 made the `already_decided` branch of `approve` refresh the run's outcome whatever the record's status. On a run routed to a person the records are `routed` or `rejected`, which the refresh maps to NEEDS_HUMAN. So an approver who posted a decision for a routed record, e.g. by picking the wrong id from a list, changed a stored ROUTED_TO_HUMAN to NEEDS_HUMAN while the reason still said `forbidden_action`. No write happened, but `GET /runs/{id}` and the grader read that label.
+- **Evidence.** The audit's reproduction B, and a test that calls `approve` on both the routed post and the rejected forbidden action of one run.
+- **Choice.** The branch refreshes the outcome only when the record's status is one the approval path can produce: `approved`, `applied`, `failed` or `declined`. For any other status it returns the run's stored outcome and writes nothing.
+- **Alternative.** Make `_refresh_run_outcome` return early for a run whose route is `human`, as `resume` does. That keeps the rule in one function, but the question is whether the approver's call had anything to do with the run, and that depends on the record.

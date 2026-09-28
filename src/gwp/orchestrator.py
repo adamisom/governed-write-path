@@ -959,8 +959,12 @@ class Orchestrator:
                 # and the sweep never visits it; the approver's retry applies what was approved (entry 47).
                 self.executor.apply(tenant_id, audit_id)
                 current = self.store.get_audit(tenant_id, audit_id) or {}
-            # A retry after a crash between the write and the run update repairs the run's outcome (case D12).
-            outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
+            if current.get("status") in ("approved", "applied", "failed", "declined"):  # what approval can produce
+                # A retry after a crash between the write and the run update repairs the run's outcome (case D12).
+                outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
+            else:
+                # A routed or rejected record never went to approval, so this call must not relabel its run (entry 48).
+                outcome = (self.store.get_run(tenant_id, audit["run_id"]) or {}).get("outcome")
             return DecisionResult("already_decided", audit_id, outcome, detail=current.get("status"))
         status = "declined"
         if decision == "approve":
