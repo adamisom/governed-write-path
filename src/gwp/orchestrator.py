@@ -174,6 +174,16 @@ def validation_feedback(ve: ValidationError) -> str:
     return "; ".join(parts)[:600]
 
 
+def unknown_ids_feedback(unknown: list[str]) -> str:
+    """Feedback for ids that exist nowhere, as kinds and counts, e.g. "unknown ids: 1 po". Like
+    `validation_feedback`, it never returns the proposal's own text, and an id is text the proposer wrote."""
+    counts: dict[str, int] = {}
+    for ref in unknown:
+        kind = ref.split(":", 1)[0]
+        counts[kind] = counts.get(kind, 0) + 1
+    return "unknown ids: " + ", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()))
+
+
 def validate_extraction(ext: Extraction) -> list[str]:
     """Step 4. A failed check is recorded and forces the approval tier; it does not stop the run."""
     flags: list[str] = []
@@ -386,7 +396,7 @@ class Orchestrator:
         if refs.cross_tenant:
             return ps, refs.cross_tenant, None
         if refs.unknown:
-            feedback = f"unknown ids: {', '.join(refs.unknown)}"
+            feedback = unknown_ids_feedback(refs.unknown)
             trace["proposal_attempts"][-1]["error"] = feedback
             return None, [], feedback
         return ps, [], None

@@ -430,7 +430,7 @@ def test_unknown_reference_gets_one_retry_then_needs_a_human(store):
     res = orch.process("T1", up.run_id)
     assert res.outcome == "APPLIED"
     attempts = store.get_run("T1", up.run_id)["proposal_attempts"]
-    assert "unknown ids: po:PO-9999" in attempts[0]["error"]
+    assert attempts[0]["error"] == "unknown ids: 1 po"  # kinds and counts, never the ids the proposer wrote
 
 
 # -- staleness -----------------------------------------------------------------------------

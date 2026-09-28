@@ -154,7 +154,7 @@ def test_an_invalid_proposal_returns_the_errors_for_one_more_try(demo):
     bad = [{**demo.proposals["C01"][0], "params": {**demo.proposals["C01"][0]["params"], "po_id": "PO-9999"}}]
     res = call_as(demo, caller(Role.agent), "propose", {"run_id": demo.runs["C01"], "proposals": bad})
     assert res.structured_content["outcome"] == "AWAITING_PROPOSAL"
-    assert "PO-9999" in res.structured_content["validation_errors"]
+    assert res.structured_content["validation_errors"] == "unknown ids: 1 po"
 
 
 def test_another_tenants_agent_cannot_see_or_propose_for_a_run(demo):

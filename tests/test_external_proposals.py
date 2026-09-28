@@ -116,9 +116,9 @@ def test_an_invalid_proposal_gets_the_errors_and_one_more_try(store):
     orch, res, _ = parked(store)
     bad = orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post(params={"po_id": "PO-9999"})]}, AGENT)
     assert (bad.outcome, bad.reason) == ("AWAITING_PROPOSAL", "invalid_proposal")
-    assert "PO-9999" in bad.detail and store.list_audits("T1", res.run_id) == []
+    assert bad.detail == "unknown ids: 1 po" and store.list_audits("T1", res.run_id) == []
     ctx = orch.proposal_context("T1", res.run_id, AGENT)
-    assert ctx["attempt"] == 2 and "PO-9999" in ctx["retry_feedback"]
+    assert ctx["attempt"] == 2 and ctx["retry_feedback"] == "unknown ids: 1 po"
     assert orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT).outcome == "APPLIED"
     attempts = store.get_run("T1", res.run_id)["proposal_attempts"]
     assert [a["attempt"] for a in attempts] == [1, 2] and "error" in attempts[0]
@@ -320,7 +320,7 @@ def test_a_parked_run_reports_a_closed_reason_and_the_feedback_only_as_detail(st
     orch, res, _ = parked(store)
     orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post(params={"po_id": "PO-9999"})]}, AGENT)
     again = orch.process("T1", res.run_id)
-    assert (again.outcome, again.reason) == ("AWAITING_PROPOSAL", "invalid_proposal") and "PO-9999" in again.detail
+    assert (again.outcome, again.reason) == ("AWAITING_PROPOSAL", "invalid_proposal") and again.detail == "unknown ids: 1 po"
 
 
 def test_a_second_invalid_proposal_opens_a_task_for_a_person(store):

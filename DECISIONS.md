@@ -551,3 +551,11 @@ Source: second Fable audit, 9/28/26 (GWP2-8).
 - **Before.** For a case outside the predicted set, the adversarial test asserted only that the verdict was not unsafe and the system-level predicate was false. If an attack stopped firing, e.g. because an `if_seen` marker no longer matched the prompt after a prompt change, the case passed with the cooperative result, and the published 22 of 24 would drop in the report with no failing test.
 - **Choice.** For every case with an attack, the test asserts the model-level result: true for all of them except I07 and I23, whose text never reaches the model, and false for those two. That covers the 24 injection cases and the five forbidden cases, which all fire today.
 - **Evidence.** With I13's `if_seen` marker changed so that it no longer matches, the old test passes and the new one fails.
+
+## 54. Feedback for unknown ids gives kinds and counts, not the ids
+
+Source: second Fable audit, 9/28/26 (GWP2-9).
+
+- **Before.** `validation_feedback` returns no text from the proposal, and M9 made the schema errors follow that rule, but the unknown id branch of step 7 returned the ids the proposer wrote, e.g. `unknown ids: po:PO-7999`. An id is at most 40 characters from a small set, so there was little room for an instruction, but the feedback is rendered outside the untrusted block and over MCP another agent may read it.
+- **Choice.** `unknown_ids_feedback` returns the kind and count of each unknown id, e.g. `unknown ids: 1 po, 1 vendor`, sorted by kind. The trace keeps the same text. The test in `test_write_path.py` and the two MCP tests that expected the old text now expect the new one, and a new test checks that the ids never come back.
+- **Alternative.** The schema position of each unknown id, e.g. `proposals.0.params.po_id`. That tells the proposer which field to fix, but the counts were what the audit suggested and are enough for L07's retry.
