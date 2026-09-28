@@ -365,7 +365,20 @@ def _check_recode(p: RecodeLine, ctx: KeyedContext, store: DynamoStore) -> Propo
     payable = store.get_payable(ctx.tenant_id, prm.payable_id) or {}
     vendor = store.get_vendor(ctx.tenant_id, payable.get("vendor_id", "")) or {}
     rules: list[str] = []
-    checks = {"account_allowed": PASS if prm.account in vendor.get("allowed_accounts", []) else FAIL}
+    human: list[str] = []
+    checks: dict[str, str] = {}
+    # The document must come from the payable's own vendor, as for a post or a credit (DECISIONS entry 50).
+    if ctx.vendor is None:
+        human.append("unknown_vendor")
+        checks["vendor_resolved"] = FAIL
+    elif payable.get("vendor_id") != ctx.vendor["vendor_id"]:
+        human.append("vendor_mismatch")
+        checks["vendor_resolved"] = FAIL
+    else:
+        checks["vendor_resolved"] = PASS
+    if ctx.extraction.document_kind == DocumentKind.credit_memo:
+        human.append("document_kind_mismatch")
+    checks["account_allowed"] = PASS if prm.account in vendor.get("allowed_accounts", []) else FAIL
     if checks["account_allowed"] == FAIL:
         rules.append("account_not_allowed")
     lines = payable.get("lines", [])
@@ -373,7 +386,7 @@ def _check_recode(p: RecodeLine, ctx: KeyedContext, store: DynamoStore) -> Propo
         rules.append("no_such_line")
     if payable.get("status") != "open":
         rules.append("payable_not_open")
-    return ProposalCheck(0, p.action, Tier.approval if rules else Tier.auto, rules, checks, [], prm.payable_id)
+    return ProposalCheck(0, p.action, Tier.approval if rules else Tier.auto, rules, checks, human, prm.payable_id)
 
 
 def _check_vendor_query(p: SendVendorQuery, ctx: KeyedContext) -> ProposalCheck:

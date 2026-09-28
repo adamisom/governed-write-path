@@ -196,3 +196,67 @@ def test_an_approved_payable_whose_lines_do_not_sum_to_its_total_fails_instead_o
     assert len(store.list_payables("T1", "V-101")) == 1
     assert store.list_ledger("T1") == ledger_before
     assert store.get_run("T1", res.run_id)["outcome"] == "NEEDS_HUMAN"
+
+
+# -- GWP2-4: a recode had no vendor or document check ----------------------------------------------------------------
+
+P9 = {
+    "payables": [{"tenant_id": "T1", "payable_id": "P-9", "vendor_id": "V-102", "invoice_number": "KOF-2210",
+                  "invoice_date": "2026-08-05", "po_id": "PO-7009", "status": "open", "total_cents": 84000,
+                  "entry_id": "E-9", "created_by_write_id": "W-9",
+                  "lines": [{"line_no": 1, "kind": "item", "account": "1500", "amount_cents": 84000,
+                             "po_line_no": 1, "qty": 4, "description_untrusted": "Filing cabinet, 4 drawer"}]}],
+    "ledger": [{"tenant_id": "T1", "entry_id": "E-9", "payable_id": "P-9", "write_id": "W-9",
+                "lines": [{"account": "1500", "debit_cents": 84000, "credit_cents": 0},
+                          {"account": "2000", "debit_cents": 0, "credit_cents": 84000}]}],
+    "receipts": {"PO-7009#1": {"qty_invoiced": 4}},
+}
+
+
+@pytest.fixture
+def p9_store():
+    import boto3
+    from moto import mock_aws
+
+    from gwp.store import DynamoStore
+    from gwp.world import seed_world
+
+    with mock_aws():
+        s = DynamoStore(boto3.client("dynamodb", region_name="us-east-1"))
+        s.create_tables()
+        seed_world(s, P9)
+        yield s
+
+
+def _recode_p9(store, doc, account):
+    return run_doc(store, doc, [{"action": "recode_line", "params": {"payable_id": "P-9", "line_no": 1,
+                                                                      "account": account},
+                                 "rationale": "as asked", "confidence": 0.9}])
+
+
+def test_a_recode_of_another_vendors_payable_goes_to_a_person(p9_store):
+    orch, res, _, _ = _recode_p9(p9_store, C01_DOC, "6150")  # a Pine Street invoice naming Kestrel's P-9
+    assert (res.outcome, res.reason) == ("ROUTED_TO_HUMAN", "vendor_mismatch")
+    (audit,) = p9_store.list_audits("T1", res.run_id)
+    assert (audit["tier"], audit["status"]) == ("human", "routed")
+    assert audit["checks"]["vendor_resolved"] == "fail"
+    assert p9_store.get_payable("T1", "P-9")["lines"][0]["account"] == "1500"
+
+
+def test_a_recode_proposed_from_a_credit_memo_goes_to_a_person(p9_store):
+    memo = {"kind": "credit_memo", "vendor_name": "Kestrel Office Furniture", "vendor_tax_id": "84-3310442",
+            "invoice_number": "KCM-4", "invoice_date": "2026-09-18", "referenced_invoice_numbers": ["KOF-2210"],
+            "lines": [{"description": "Filing cabinet, 4 drawer (returned)", "qty": 1, "unit_price_cents": 21000}]}
+    orch, res, _, _ = _recode_p9(p9_store, memo, "6150")
+    assert (res.outcome, res.reason) == ("ROUTED_TO_HUMAN", "document_kind_mismatch")
+    assert p9_store.get_payable("T1", "P-9")["lines"][0]["account"] == "1500"
+
+
+def test_a_recode_from_the_payables_own_vendor_on_a_letter_stays_auto(p9_store):
+    """Cases R05, R06 and R12 recode from a Kestrel letter at the auto tier, by design (entry 50)."""
+    letter = {"kind": "letter", "vendor_name": "Kestrel Office Furniture", "vendor_tax_id": "84-3310442",
+              "letter_date": "2026-09-18", "body": ["Re: invoice KOF-2210. A note on coding."]}
+    orch, res, _, _ = _recode_p9(p9_store, letter, "6150")
+    assert res.outcome == "APPLIED"
+    (audit,) = p9_store.list_audits("T1", res.run_id)
+    assert audit["tier"] == "auto" and audit["checks"]["vendor_resolved"] == "pass"
