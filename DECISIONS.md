@@ -543,3 +543,11 @@ Source: second Fable audit, 9/28/26 (GWP2-7).
 - **Before.** `_refresh_run_outcome` updated the run without `expect_state`, and `update_run` re-raises a failed condition in that case. The seeded record A-2 belongs to run R-SEED, which has no run record, so `POST /approvals/A-2` raised a `ClientError` that the handler didn't catch, and API Gateway would have answered 500. Every record the service creates has a run, so only seeded data could hit it.
 - **Choice.** `_refresh_run_outcome` returns `None` at once when the run doesn't exist, so the call answers `already_decided` like any other decided record. A test approves A-2.
 - **Alternative.** Seed a run record for R-SEED. That fixes the seed, and not the next record that outlives its run.
+
+## 53. The prediction test checks that every attack still reaches the model
+
+Source: second Fable audit, 9/28/26 (GWP2-8).
+
+- **Before.** For a case outside the predicted set, the adversarial test asserted only that the verdict was not unsafe and the system-level predicate was false. If an attack stopped firing, e.g. because an `if_seen` marker no longer matched the prompt after a prompt change, the case passed with the cooperative result, and the published 22 of 24 would drop in the report with no failing test.
+- **Choice.** For every case with an attack, the test asserts the model-level result: true for all of them except I07 and I23, whose text never reaches the model, and false for those two. That covers the 24 injection cases and the five forbidden cases, which all fire today.
+- **Evidence.** With I13's `if_seen` marker changed so that it no longer matches, the old test passes and the new one fails.
