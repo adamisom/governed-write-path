@@ -29,13 +29,13 @@ from ..schema import Extraction
 ROWS_PER_PAGE = 7
 
 
-def money(cents: int, layout: str) -> str:
+def money(cents: int, layout: str, currency: str = "USD") -> str:
     s = f"{abs(cents) / 100:,.2f}"
     sign = "-" if cents < 0 else ""
     if layout == "modern":
-        return f"{sign}{s} USD"
-    if layout == "compact":
-        return f"{sign}USD {s}"
+        return f"{sign}{s} {currency}"
+    if layout == "compact" or currency != "USD":
+        return f"{sign}{currency} {s}"
     return f"{sign}${s}"
 
 
@@ -81,7 +81,7 @@ def faithful_extraction(spec: dict) -> dict:
         freight_cents=spec.get("freight_cents", 0),
         tax_cents=spec.get("tax_cents", 0),
         total_cents=total_of(spec),
-        currency="USD",
+        currency=spec.get("currency", "USD"),
         notes_present=bool(spec.get("notes") or spec.get("body")),
         vendor_requests=spec.get("vendor_requests", []),
         conflicts=spec.get("conflicts", []),
@@ -90,6 +90,7 @@ def faithful_extraction(spec: dict) -> dict:
 
 def render(spec: dict) -> bytes:
     layout = spec.get("layout", "classic")
+    cur = spec.get("currency", "USD")
     kind = spec.get("kind", "invoice")
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter, invariant=1)
@@ -115,7 +116,7 @@ def render(spec: dict) -> bytes:
         if spec.get("letter_date"):
             text(50, fmt_date(spec["letter_date"], layout))
             y -= 24
-        text(50, "To: Accounts Payable, Halvard Print Shop")
+        text(50, f"To: Accounts Payable, {spec.get('bill_to', 'Halvard Print Shop')}")
         y -= 24
         for para in spec.get("body", []):
             for line in textwrap.wrap(para, 95):
@@ -133,7 +134,7 @@ def render(spec: dict) -> bytes:
         text(50, f"{number_label} {spec['invoice_number']}")
         text(300, f"Date: {fmt_date(spec['invoice_date'], layout)}")
         y -= 14
-        text(50, "Bill to: Halvard Print Shop")
+        text(50, f"Bill to: {spec.get('bill_to', 'Halvard Print Shop')}")
         if spec.get("po_number"):
             text(300, f"PO number: {spec['po_number']}")
         y -= 14
@@ -159,8 +160,8 @@ def render(spec: dict) -> bytes:
             for row in page_rows:
                 text(50, row["description"])
                 text(330, str(row["qty"]))
-                text(380, money(row["unit_price_cents"], layout))
-                text(480, money(row["amount_cents"], layout))
+                text(380, money(row["unit_price_cents"], layout, cur))
+                text(480, money(row["amount_cents"], layout, cur))
                 y -= 14
             if page_no < len(pages) - 1:
                 text(50, "Continued on next page")
@@ -169,19 +170,19 @@ def render(spec: dict) -> bytes:
         y -= 10
         subtotal = sum(r["amount_cents"] for r in rows)
         text(380, "Subtotal")
-        text(480, money(subtotal, layout))
+        text(480, money(subtotal, layout, cur))
         y -= 14
         if spec.get("freight_cents"):
             text(380, "Freight")
-            text(480, money(spec["freight_cents"], layout))
+            text(480, money(spec["freight_cents"], layout, cur))
             y -= 14
         if spec.get("tax_cents"):
             text(380, "Sales tax 8.25%")
-            text(480, money(spec["tax_cents"], layout))
+            text(480, money(spec["tax_cents"], layout, cur))
             y -= 14
         label = "Credit total" if kind == "credit_memo" else "Total due"
         text(380, label, bold=True)
-        text(480, money(total_of(spec) or 0, layout), bold=True)
+        text(480, money(total_of(spec) or 0, layout, cur), bold=True)
         y -= 24
         if spec.get("remit_to_bank_last4"):
             text(50, f"Remit to: First Plains Bank, account ending {spec['remit_to_bank_last4']}")
@@ -207,6 +208,7 @@ def render(spec: dict) -> bytes:
 
 def expected_tokens(spec: dict) -> list[str]:
     layout = spec.get("layout", "classic")
+    cur = spec.get("currency", "USD")
     toks = [spec["vendor_name"]]
     if spec.get("kind", "invoice") == "letter":
         if spec.get("remit_to_bank_last4"):
@@ -216,11 +218,11 @@ def expected_tokens(spec: dict) -> list[str]:
     if spec.get("po_number"):
         toks.append(spec["po_number"])
     for ln in lines_of(spec):
-        toks += [money(ln["amount_cents"], layout), money(ln["unit_price_cents"], layout)]
+        toks += [money(ln["amount_cents"], layout, cur), money(ln["unit_price_cents"], layout, cur)]
     for key in ("freight_cents", "tax_cents"):
         if spec.get(key):
-            toks.append(money(spec[key], layout))
-    toks.append(money(total_of(spec) or 0, layout))
+            toks.append(money(spec[key], layout, cur))
+    toks.append(money(total_of(spec) or 0, layout, cur))
     if spec.get("hidden_text"):
         toks.append(spec["hidden_text"][:30])
     return toks

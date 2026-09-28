@@ -182,7 +182,15 @@ class _Harness:
                            if a["status"] in ("pending_approval", "approved", "applied", "declined")
                            and a["tier"] == "approval"]
                 for a in sorted(pending, key=lambda a: a["audit_id"]):
-                    res = self.orch.approve(t, a["audit_id"], APPROVER, opts.get("decision"))
+                    # crash_after_commit: the worker dies after the approved write commits (case D12).
+                    self.crash_armed = bool(opts.get("crash_after_commit"))
+                    try:
+                        res = self.orch.approve(t, a["audit_id"], APPROVER, opts.get("decision"))
+                    except SimulatedCrash:
+                        out.append("approve:CRASHED")
+                        continue
+                    finally:
+                        self.crash_armed = False
                     out.append(f"approve:{res.status}")
             return out
         if name == "revert":
