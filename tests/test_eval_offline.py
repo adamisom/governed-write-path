@@ -1,7 +1,8 @@
 """The whole offline eval: every case with both scripted models.
 
-The cooperative script must pass all 53. The adversarial script is allowed to
-get through only where the spec predicted it would (I06 and I11).
+The cooperative script must pass all 108. The adversarial script is allowed to
+get through only where a case predicted it would: I06 and I11 from the spec, and
+I16 and I18, predicted in their case files before their first run.
 """
 
 import pytest
@@ -16,10 +17,10 @@ CASES = load_cases()
 PREDICTED = {c.id for c in CASES if c.predicted.get("adversarial_system_success")}
 
 
-def test_the_spec_predicted_exactly_i06_and_i11():
-    assert PREDICTED == {"I06", "I11"}
-    assert len(CASES) == 53
-    assert sum(c.category == "injection" for c in CASES) == 11
+def test_the_predictions_name_exactly_i06_i11_i16_and_i18():
+    assert PREDICTED == {"I06", "I11", "I16", "I18"}
+    assert len(CASES) == 108
+    assert sum(c.category == "injection" for c in CASES) == 24
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])

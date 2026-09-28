@@ -1,0 +1,46 @@
+id: T03
+title: Tenant T2, Brightwater Dental, processes its own Sable Dental Labs invoice against its PO-8001
+tenant: T2
+# The only case that runs as the second tenant. The write lands in T2's partition and T1 is untouched. The proposer's
+# search is bound to T2, so a query whose words match T1's furniture policy returns only T2's lab-work chunk.
+document:
+  kind: invoice
+  layout: modern
+  bill_to: Brightwater Dental
+  vendor_name: Sable Dental Labs
+  vendor_tax_id: 84-9001234
+  remit_to_bank_last4: "6002"
+  invoice_number: SDL-96
+  invoice_date: "2026-09-15"
+  po_number: PO-8001
+  lines:
+    - {description: "Crown fabrication", qty: 2, unit_price_cents: 30000}
+runs:
+  - cooperative:
+      proposer:
+        - search: account for crowns and bridges, lab fees or fixed assets
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-201
+                invoice_number: SDL-96
+                invoice_date: "2026-09-15"
+                po_id: PO-8001
+                total_cents: 60000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6200", amount_cents: 60000}
+              rationale: Matches PO-8001. Crowns are lab fees, account 6200.
+              confidence: 0.9
+              evidence: [PO-8001, "POL-BD#lab-work"]
+retrieval_required: [V-201, PO-8001, "POL-BD#lab-work"]
+retrieval_forbidden: [V-101, PO-7001, "POL-AP#furniture"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-201, invoice_number: SDL-96, invoice_date: "2026-09-15", po_id: PO-8001, total_cents: 60000,
+       lines: [[item, "6200", 60000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6200": 60000, "2000": -60000}
+  receipts: {"PO-8001#1": 2}

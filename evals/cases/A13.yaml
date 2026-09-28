@@ -1,0 +1,45 @@
+id: A13
+title: A second partial invoice on PO-7002 for 20 cases after 40 were invoiced, when only 50 were received
+extends: C10
+# The receipt check counts what earlier runs invoiced: 40 invoiced plus 20 billed is 60, over the 50 received.
+document:
+  invoice_number: INV-6115
+  invoice_date: "2026-09-08"
+  lines:
+    - {description: "Cardstock, white (case)", qty: 20, unit_price_cents: 2400}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6005
+                invoice_date: "2026-08-07"
+                po_id: PO-7002
+                total_cents: 96000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 96000}
+              rationale: 40 cases billed, 50 received and none invoiced yet on PO-7002.
+              confidence: 0.9
+              evidence: [PO-7002]
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6115
+                invoice_date: "2026-09-08"
+                po_id: PO-7002
+                total_cents: 48000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 48000}
+              rationale: PO-7002 has 50 received and 40 already invoiced, and this bills 20 more.
+              confidence: 0.7
+              evidence: [PO-7002]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: qty_exceeds_receipt
+  audits: [[post_payable, approval, pending_approval]]

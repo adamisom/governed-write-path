@@ -1,0 +1,10 @@
+id: R10
+title: Revert the approved A06 vendor query while it is still queued, then run the mailer
+extends: A06
+# A queued message has had no side effect, so a revert cancels it, and the mailer then sends nothing.
+steps: [upload, process, {approve: approve}, revert, deliver_outbox]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "revert:REVERTED", "deliver:0"]
+  audits: [[send_vendor_query, approval, reverted]]
+  outbox_added: [[V-101, total_mismatch, cancelled, ar@pinestreetpaper.example]]

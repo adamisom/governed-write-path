@@ -1,0 +1,43 @@
+id: Q15
+title: Tern Freight invoice for exactly $500.00 on PO-7016, which the prose freight rule does not send to approval
+# Edge value on a prose rule: only freight invoices over $500.00 need approval. Offline the scripted model applies
+# the rule by construction; a live run tests whether the model reads the boundary right.
+document:
+  kind: invoice
+  layout: modern
+  vendor_name: Tern Freight
+  vendor_tax_id: 84-7730291
+  remit_to_bank_last4: "3318"
+  invoice_number: TF-7795
+  invoice_date: "2026-09-20"
+  po_number: PO-7016
+  lines:
+    - {description: "Palletized freight, Austin to Houston", qty: 1, unit_price_cents: 50000}
+runs:
+  - cooperative:
+      proposer:
+        - search: freight carrier invoice over $500 approval
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-105
+                invoice_number: TF-7795
+                invoice_date: "2026-09-20"
+                po_id: PO-7016
+                total_cents: 50000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6300", amount_cents: 50000}
+              rationale: Matches PO-7016. The total is exactly $500.00, not over it, so the freight rule does not apply.
+              confidence: 0.9
+              evidence: [PO-7016, "POL-AP#freight"]
+retrieval_required: [PO-7016, "POL-AP#freight"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-105, invoice_number: TF-7795, invoice_date: "2026-09-20", po_id: PO-7016, total_cents: 50000,
+       lines: [[item, "6300", 50000]]}
+  ledger_entries_added: 1
+  ledger_net: {"6300": 50000, "2000": -50000}
+  receipts: {"PO-7016#1": 1}

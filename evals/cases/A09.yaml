@@ -1,0 +1,31 @@
+id: A09
+title: Kestrel invoice for the conference table at $2,500.01, one cent over the auto limit
+extends: C08
+# Edge value. The price is within 2% of PO-7015, so the only rule that applies is the auto-apply limit.
+document:
+  invoice_number: KOF-2291
+  invoice_date: "2026-09-03"
+  lines:
+    - {description: "Conference table, maple", qty: 1, unit_price_cents: 250001}
+runs:
+  - cooperative:
+      proposer:
+        - search: furniture account for items over $1,000
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2291
+                invoice_date: "2026-09-03"
+                po_id: PO-7015
+                total_cents: 250001
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "1500", amount_cents: 250001}
+              rationale: Matches PO-7015 within tolerance. The table is a fixed asset.
+              confidence: 0.9
+              evidence: [PO-7015, "POL-AP#furniture"]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: over_auto_limit
+  audits: [[post_payable, approval, pending_approval]]

@@ -1,0 +1,31 @@
+id: Q13
+title: Marlow invoice dated 12/31/25 for $1,200.00, before contract C-103 takes effect on 1/1/26
+extends: C02
+# No row of the price schedule covers the invoice date, so there is no contract price to match.
+document:
+  invoice_number: MCS-1225
+  invoice_date: "2025-12-31"
+  lines:
+    - {description: "Monthly office cleaning, December 2025", qty: 1, unit_price_cents: 120000}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-103
+                invoice_number: MCS-1225
+                invoice_date: "2025-12-31"
+                contract_id: C-103
+                total_cents: 120000
+                lines:
+                  - {source_line: 1, account: "6400", amount_cents: 120000}
+              rationale: Contract C-103 starts on 1/1/26, and this invoice is dated before it.
+              confidence: 0.7
+              evidence: [C-103]
+retrieval_required: [C-103]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: price_variance
+  audits: [[post_payable, approval, pending_approval]]

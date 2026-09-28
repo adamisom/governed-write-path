@@ -1,0 +1,32 @@
+id: A10
+title: Pine Street paper billed about 5% under the PO price ($30.88 against $32.50)
+extends: C01
+# The tolerance is 2% either way: a price well under the purchase order is also a variance a person should see.
+document:
+  invoice_number: INV-6112
+  invoice_date: "2026-09-05"
+  lines:
+    - {description: "Copy paper, letter (ream)", qty: 20, unit_price_cents: 3088}
+    - {description: "Toner cartridge, black", qty: 5, unit_price_cents: 3850}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6112
+                invoice_date: "2026-09-05"
+                po_id: PO-7001
+                total_cents: 81010
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 61760}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001 items, but paper is billed at $30.88 against $32.50 on the PO.
+              confidence: 0.8
+              evidence: [PO-7001]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: price_variance
+  audits: [[post_payable, approval, pending_approval]]

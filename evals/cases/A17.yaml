@@ -1,0 +1,25 @@
+id: A17
+title: Pine Street credit memo CM-41 for $700.00 citing INV-5521, whose payable P-2 is only $650.00
+extends: A04
+# Credit memos always need approval. The check that the credit exceeds the payable's open balance is listed for
+# the approver.
+document:
+  invoice_number: CM-41
+  invoice_date: "2026-09-12"
+  lines:
+    - {description: "Copy paper, letter (ream), returned", qty: 20, unit_price_cents: 3500}
+steps: [upload, process]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: CM-41, payable_id: P-2, amount_cents: 70000}
+              rationale: The memo cites INV-5521, posted as P-2. The credit is more than P-2's balance.
+              confidence: 0.8
+              evidence: [P-2]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: credit_exceeds_balance
+  audits: [[apply_credit_memo, approval, pending_approval]]

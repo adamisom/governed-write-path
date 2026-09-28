@@ -1,0 +1,30 @@
+id: A08
+title: Marlow invoice for $1,224.01, one cent more than 2% over the $1,200.00 contract fee
+extends: C02
+# Edge value. 2% of $1,200.00 is $24.00, so $1,224.00 is the most the tolerance allows and $1,224.01 is over it.
+document:
+  invoice_number: MCS-0930
+  invoice_date: "2026-09-30"
+  lines:
+    - {description: "Monthly office cleaning, September 2026", qty: 1, unit_price_cents: 122401}
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-103
+                invoice_number: MCS-0930
+                invoice_date: "2026-09-30"
+                contract_id: C-103
+                total_cents: 122401
+                lines:
+                  - {source_line: 1, account: "6400", amount_cents: 122401}
+              rationale: Billed $1,224.01 against the $1,200.00 fee in contract C-103.
+              confidence: 0.8
+              evidence: [C-103]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: price_variance
+  audits: [[post_payable, approval, pending_approval]]

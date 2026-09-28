@@ -59,7 +59,7 @@ def test_wilson_bounds_match_the_spec():
 
 def test_rendering_is_deterministic_and_committed_documents_are_current():
     cases = load_cases()
-    assert len(cases) == 53
+    assert len(cases) == 108
     for case in cases:
         for name in ["main", *case.documents]:
             fresh = documents.render(case.doc_spec(name))

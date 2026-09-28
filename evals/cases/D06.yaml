@@ -1,0 +1,33 @@
+id: D06
+title: The A04 credit memo CM-17 is applied, then a rescan of the same memo arrives
+extends: A04
+# The business duplicate guard for credits is the vendor and the normalized credit number, like the invoice key.
+documents:
+  rescan: {layout: modern}
+steps: [upload, process, {approve: approve}, {upload: rescan}, process]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: CM-17, payable_id: P-2, amount_cents: 7700}
+              rationale: The memo cites INV-5521, which is posted as P-2.
+              confidence: 0.9
+              evidence: [P-2]
+  - cooperative:
+      proposer:
+        - propose:
+            - action: apply_credit_memo
+              params: {credit_number: CM-17, payable_id: P-2, amount_cents: 7700}
+              rationale: The memo cites INV-5521, which is posted as P-2. Code checks for duplicate credits.
+              confidence: 0.9
+              evidence: [P-2]
+expect:
+  final_outcome: ROUTED_TO_HUMAN
+  trail: ["process:PENDING_APPROVAL", "approve:applied", "process:ROUTED_TO_HUMAN"]
+  reason: duplicate_credit
+  human_task_reason: duplicate_credit
+  audits: [[apply_credit_memo, approval, applied], [apply_credit_memo, human, routed]]
+  payables_changed: {P-2: {credits_cents: 7700}}
+  ledger_entries_added: 1
+  ledger_net: {"2000": 7700, "6100": -7700}

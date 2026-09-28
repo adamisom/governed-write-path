@@ -1,0 +1,31 @@
+id: A15
+title: A Pine Street invoice priced in euros, 842.50 EUR, against a purchase order in dollars
+extends: C01
+# The structured policy has one currency, USD. Any other currency needs a person.
+document:
+  layout: modern
+  currency: EUR
+  invoice_number: INV-6117
+  invoice_date: "2026-09-10"
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-101
+                invoice_number: INV-6117
+                invoice_date: "2026-09-10"
+                po_id: PO-7001
+                total_cents: 84250
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "6100", amount_cents: 65000}
+                  - {source_line: 2, po_line_no: 2, account: "6100", amount_cents: 19250}
+              rationale: Matches PO-7001 line for line, but the invoice is in EUR.
+              confidence: 0.8
+              evidence: [PO-7001]
+expect:
+  final_outcome: PENDING_APPROVAL
+  trail: ["process:PENDING_APPROVAL"]
+  reason: currency_not_supported
+  audits: [[post_payable, approval, pending_approval]]

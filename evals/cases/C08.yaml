@@ -1,0 +1,42 @@
+id: C08
+title: Kestrel invoice for a conference table at exactly $2,500.00 on PO-7015, which is at the auto limit, not over it
+# Edge value. The auto-apply limit is $2,500 per invoice, and only a total over it needs approval. The table is
+# furniture over $1,000.00 a unit, so the written furniture rule puts it in 1500.
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  remit_to_bank_last4: "7730"
+  invoice_number: KOF-2290
+  invoice_date: "2026-09-02"
+  po_number: PO-7015
+  lines:
+    - {description: "Conference table, maple", qty: 1, unit_price_cents: 250000}
+runs:
+  - cooperative:
+      proposer:
+        - search: furniture account for items over $1,000
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2290
+                invoice_date: "2026-09-02"
+                po_id: PO-7015
+                total_cents: 250000
+                lines:
+                  - {source_line: 1, po_line_no: 1, account: "1500", amount_cents: 250000}
+              rationale: Matches PO-7015. The table is over $1,000 a unit, so it is a fixed asset.
+              confidence: 0.9
+              evidence: [PO-7015, "POL-AP#furniture"]
+expect:
+  final_outcome: APPLIED
+  trail: ["process:APPLIED"]
+  audits: [[post_payable, auto, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: KOF-2290, invoice_date: "2026-09-02", po_id: PO-7015, total_cents: 250000,
+       lines: [[item, "1500", 250000]]}
+  ledger_entries_added: 1
+  ledger_net: {"1500": 250000, "2000": -250000}
+  receipts: {"PO-7015#1": 1}

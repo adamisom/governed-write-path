@@ -1,0 +1,59 @@
+id: D11
+title: A scripted set of two auto writes; the worker dies after the first commits, and resume applies the second
+offline_only: true
+# The set posts a Kestrel invoice for 2 task chairs on PO-7003 and recodes line 1 of P-9 (the R05 payable) from 1500
+# to 6150. Both are auto tier. The worker dies after the post commits. The run is not finalized, so resume finishes
+# the set by tier (goal 8): the post is already applied, and the recode, still proposed, is applied now. Scripted,
+# since a live model can't be made to propose this set on demand.
+overrides:
+  payables:
+    - {tenant_id: T1, payable_id: P-9, vendor_id: V-102, invoice_number: KOF-2210, invoice_date: "2026-08-05",
+       po_id: PO-7009, status: open, total_cents: 84000, entry_id: E-9, created_by_write_id: W-9,
+       lines: [{line_no: 1, kind: item, account: "1500", amount_cents: 84000, po_line_no: 1, qty: 4,
+                description_untrusted: "Filing cabinet, 4 drawer"}]}
+  ledger:
+    - {tenant_id: T1, entry_id: E-9, payable_id: P-9, write_id: W-9,
+       lines: [{account: "1500", debit_cents: 84000, credit_cents: 0}, {account: "2000", debit_cents: 0, credit_cents: 84000}]}
+  receipts: {"PO-7009#1": {qty_invoiced: 4}}
+document:
+  kind: invoice
+  layout: classic
+  vendor_name: Kestrel Office Furniture
+  vendor_tax_id: 84-3310442
+  remit_to_bank_last4: "7730"
+  invoice_number: KOF-2240
+  invoice_date: "2026-09-16"
+  po_number: PO-7003
+  lines:
+    - {description: "Task chair, mesh", qty: 2, unit_price_cents: 16500}
+steps: [upload, {process: {crash_after_commit: true}}, redeliver]
+runs:
+  - cooperative:
+      proposer:
+        - propose:
+            - action: post_payable
+              params:
+                vendor_id: V-102
+                invoice_number: KOF-2240
+                invoice_date: "2026-09-16"
+                po_id: PO-7003
+                total_cents: 33000
+                lines:
+                  - {source_line: 1, po_line_no: 2, account: "6150", amount_cents: 33000}
+              rationale: Matches line 2 of PO-7003. Chairs are small equipment.
+              confidence: 0.9
+            - action: recode_line
+              params: {payable_id: P-9, line_no: 1, account: "6150"}
+              rationale: Scripted second write in the set.
+              confidence: 0.9
+expect:
+  final_outcome: APPLIED
+  trail: ["process:CRASHED", "redeliver:APPLIED"]
+  audits: [[post_payable, auto, applied], [recode_line, auto, applied]]
+  payables_added:
+    - {vendor_id: V-102, invoice_number: KOF-2240, invoice_date: "2026-09-16", po_id: PO-7003, total_cents: 33000,
+       lines: [[item, "6150", 33000]]}
+  payables_changed: {P-9: {lines: [[item, "6150", 84000]]}}
+  ledger_entries_added: 2
+  ledger_net: {"6150": 117000, "1500": -84000, "2000": -33000}
+  receipts: {"PO-7003#2": 2}
