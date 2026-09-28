@@ -48,7 +48,7 @@ class SimulatedCrash(BaseException):
 
 @dataclass
 class ExecResult:
-    status: str  # applied | already_applied | failed | conflict | reverted | already_reverted | refused
+    status: str  # applied | already_applied | failed | conflict | retryable | reverted | already_reverted | refused
     write_ids: list[str] = field(default_factory=list)
     error: str | None = None
     refusal_reason: str | None = None
@@ -149,6 +149,14 @@ class Executor:
                     return ExecResult("already_applied", current.get("write_ids", []))
                 return ExecResult("conflict", error=f"audit status is {current.get('status')}")
             failed = [i for i, r in enumerate(reasons) if r == "ConditionalCheckFailed"]
+            if not failed:
+                # Cancelled by contention or throttling, not by a failed condition, so the write may still apply.
+                # Keep the record where it is and note why; the approver's retry or the staleness pass applies it
+                # (DECISIONS entry 51).
+                codes = [r for r in reasons if r not in ("None", "")]
+                s.append_audit_note(tenant_id, audit_id, self.clock.now(),
+                                    "apply_cancelled:" + ",".join(codes)[:200], {"cancellation_reasons": reasons})
+                return ExecResult("retryable", error="transaction_cancelled:" + ",".join(codes)[:200])
             error = "precondition_failed:" + ",".join(str(i) for i in failed)
             s.transition_audit(tenant_id, audit_id, ["proposed", "approved"], "failed", self.clock.now(),
                                {"error": error}, terminal=True)

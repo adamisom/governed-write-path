@@ -102,7 +102,7 @@ class RunResult:
 
 @dataclass
 class DecisionResult:
-    status: str  # applied | declined | already_decided | failed
+    status: str  # applied | declined | already_decided | failed | retryable (the retry applies it)
     audit_id: str
     run_outcome: str | None = None
     detail: str | None = None
@@ -969,7 +969,8 @@ class Orchestrator:
         status = "declined"
         if decision == "approve":
             res = self.executor.apply(tenant_id, audit_id)
-            status = "applied" if res.status in ("applied", "already_applied") else "failed"
+            status = "applied" if res.status in ("applied", "already_applied") else \
+                "retryable" if res.status == "retryable" else "failed"  # retryable: still approved (entry 51)
         outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
         return DecisionResult(status, audit_id, outcome)
 

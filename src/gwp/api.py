@@ -167,7 +167,9 @@ def handler(event: dict, context: Any = None) -> dict:
         if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
             body = json.loads(event.get("body") or "{}")
             res = orch.approve(tenant, parts[1], principal, body.get("decision"), body.get("note"))
-            return _resp(409 if res.status == "already_decided" else 200, res.__dict__)
+            # retryable: the decision is recorded and the apply was cancelled by contention; the retry applies it.
+            code = {"already_decided": 409, "retryable": 503}.get(res.status, 200)
+            return _resp(code, res.__dict__)
         if method == "POST" and len(parts) == 2 and parts[0] == "reverts":
             res = orch.revert(tenant, parts[1], principal)
             return _resp(200 if res.outcome == "REVERTED" else 409, res.__dict__)

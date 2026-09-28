@@ -260,3 +260,106 @@ def test_a_recode_from_the_payables_own_vendor_on_a_letter_stays_auto(p9_store):
     assert res.outcome == "APPLIED"
     (audit,) = p9_store.list_audits("T1", res.run_id)
     assert audit["tier"] == "auto" and audit["checks"]["vendor_resolved"] == "pass"
+
+
+# -- GWP2-5: a transaction cancelled for a reason other than a failed condition marked the write failed for good -----
+
+
+def _cancel_once(store, code):
+    from botocore.exceptions import ClientError
+
+    real = store.client.transact_write_items
+    once = []
+
+    def cancel(**kw):
+        if not once:
+            once.append(1)
+            n = len(kw["TransactItems"])
+            raise ClientError({"Error": {"Code": "TransactionCanceledException", "Message": "Transaction cancelled"},
+                               "CancellationReasons": [{"Code": code}] + [{"Code": "None"}] * (n - 1)},
+                              "TransactWriteItems")
+        return real(**kw)
+
+    store.client.transact_write_items = cancel
+    return lambda: setattr(store.client, "transact_write_items", real)
+
+
+@pytest.mark.parametrize("code", ["TransactionConflict", "ThrottlingError"])
+def test_an_approval_whose_transaction_is_cancelled_by_contention_stays_approved_for_the_retry(store, code):
+    orch, res, _, _ = run_doc(store, C01_DOC, [c01_post(requires_approval_reason="x")])
+    aid = res.audit_ids[0]
+    restore = _cancel_once(store, code)
+    d = orch.approve("T1", aid, APPROVER, "approve")
+    restore()
+    assert (d.status, d.run_outcome) == ("retryable", "PENDING_APPROVAL")
+    audit = store.get_audit("T1", aid)
+    assert audit["status"] == "approved" and audit.get("error") is None
+    assert audit["cancellation_reasons"][0] == code
+    assert audit["history"][-1]["state"] == f"apply_cancelled:{code}"
+    assert len(store.list_payables("T1", "V-101")) == 1
+    retry = orch.approve("T1", aid, APPROVER, "approve")
+    assert (retry.status, retry.run_outcome) == ("already_decided", "APPLIED")
+    assert store.get_audit("T1", aid)["status"] == "applied"
+    assert len(store.list_payables("T1", "V-101")) == 2
+    assert orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER).duplicate
+
+
+def test_an_auto_write_whose_transaction_is_cancelled_by_contention_is_finished_by_the_staleness_pass(store):
+    ext = documents.faithful_extraction(C01_DOC)
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": ext}],
+                       [{"tool": "propose_write", "input": {"proposals": [c01_post()]}}])
+    up = orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER)
+    restore = _cancel_once(store, "TransactionConflict")
+    res = orch.process("T1", up.run_id)
+    restore()
+    assert (res.outcome, res.reason) == ("NEEDS_HUMAN", "apply_failed")
+    (audit,) = store.list_audits("T1", up.run_id)
+    assert audit["status"] == "proposed"
+    orch.clock.advance(16 * 60)
+    assert [r["outcome"] for r in orch.resume_stale()] == ["APPLIED"]
+    assert store.get_audit("T1", audit["audit_id"])["status"] == "applied"
+    assert len(store.list_payables("T1", "V-101")) == 2
+
+
+def test_a_cancellation_with_a_failed_condition_still_fails_the_write(store):
+    orch, res, _, _ = run_doc(store, C01_DOC, [c01_post(requires_approval_reason="x")])
+    aid = res.audit_ids[0]
+    from botocore.exceptions import ClientError
+
+    real = store.client.transact_write_items
+
+    def cancel(**kw):
+        n = len(kw["TransactItems"])
+        raise ClientError({"Error": {"Code": "TransactionCanceledException", "Message": "Transaction cancelled"},
+                           "CancellationReasons": [{"Code": "TransactionConflict"}, {"Code": "ConditionalCheckFailed"}]
+                           + [{"Code": "None"}] * (n - 2)}, "TransactWriteItems")
+
+    store.client.transact_write_items = cancel
+    d = orch.approve("T1", aid, APPROVER, "approve")
+    store.client.transact_write_items = real
+    assert d.status == "failed"
+    assert store.get_audit("T1", aid)["status"] == "failed"
+
+
+def test_the_api_answers_503_for_an_approval_cancelled_by_contention_and_the_retry_applies_it(store, monkeypatch):
+    import json
+
+    from gwp import api
+    from gwp.runtime import sha256_hex
+
+    monkeypatch.setenv("GWP_API_KEYS", json.dumps(
+        {sha256_hex("ap-key"): {"principal_id": "user:ap", "role": "approver", "tenant_id": "T1"}}))
+    orch, res, _, _ = run_doc(store, C01_DOC, [c01_post(requires_approval_reason="x")])
+    aid = res.audit_ids[0]
+    event = {"requestContext": {"http": {"method": "POST"}}, "rawPath": f"/approvals/{aid}",
+             "headers": {"x-api-key": "ap-key"}, "body": json.dumps({"decision": "approve"})}
+    api.set_orchestrator_factory(lambda: orch)
+    try:
+        restore = _cancel_once(store, "TransactionConflict")
+        first = api.handler(event)
+        restore()
+        second = api.handler(event)
+    finally:
+        api.set_orchestrator_factory(None)
+    assert first["statusCode"] == 503 and json.loads(first["body"])["status"] == "retryable"
+    assert second["statusCode"] == 409 and json.loads(second["body"])["run_outcome"] == "APPLIED"
