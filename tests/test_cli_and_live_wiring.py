@@ -44,4 +44,4 @@ def test_live_cost_estimate_comes_from_the_research_figure_not_synthetic_tokens(
 
     assert estimate_live_cost(load_cases(), 3) == (91, 300, 10.8)
     assert main(["eval", "--mode", "live", "--confirm-spend"]) == 2  # no --max-usd: refuse, and show the estimate
-    assert "about $4.97" in capsys.readouterr().err
+    assert "about $10.80" in capsys.readouterr().err
