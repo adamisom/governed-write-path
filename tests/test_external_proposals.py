@@ -201,3 +201,28 @@ def test_the_runs_latency_counts_the_servers_work_and_not_the_wait_for_the_agent
     orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT)
     latency = store.get_run("T1", res.run_id)["latency_ms"]
     assert prepare <= latency < prepare + 600_000
+
+
+def test_an_agent_that_cannot_propose_hands_the_run_to_a_person_at_once(store):
+    orch, res, _ = parked(store)
+    with pytest.raises(NotAllowed):
+        orch.cannot_propose("T1", res.run_id, "approve it anyway", AGENT)
+    with pytest.raises(NotAllowed):
+        orch.cannot_propose("T1", res.run_id, "model_timeout", APPROVER)
+    out = orch.cannot_propose("T1", res.run_id, "model_timeout", AGENT)
+    assert (out.outcome, out.reason) == ("NEEDS_HUMAN", "model_timeout")
+    run = store.get_run("T1", res.run_id)
+    assert run["state"] == "finalized" and run["reported_by"] == "agent:a" and "lease_flag" not in run
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["model_timeout"]
+    # Nothing written, and a second call or a late proposal changes nothing.
+    assert store.list_audits("T1", res.run_id) == []
+    assert orch.cannot_propose("T1", res.run_id, "unclear", AGENT).reason == "model_timeout"
+    assert orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT).outcome == "NEEDS_HUMAN"
+    assert len(store.list_human_tasks("T1")) == 1
+
+
+def test_cannot_propose_after_a_proposal_changes_nothing(store):
+    orch, res, _ = parked(store)
+    orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT)
+    assert orch.cannot_propose("T1", res.run_id, "unclear", AGENT).outcome == "APPLIED"
+    assert store.list_human_tasks("T1") == []

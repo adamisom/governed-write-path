@@ -33,6 +33,7 @@ TOOL_ROLES: dict[str, frozenset[Role]] = {
     "get_proposal_context": frozenset({Role.agent}),
     "search_policy": frozenset({Role.agent}),
     "propose": frozenset({Role.agent}),
+    "cannot_propose": frozenset({Role.agent}),
     "list_pending_approvals": frozenset({Role.approver}),
     "get_approval_view": frozenset({Role.approver}),
     "decide": frozenset({Role.approver}),

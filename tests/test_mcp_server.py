@@ -48,6 +48,7 @@ def tool_args(d) -> dict[str, dict]:
         "get_proposal_context": {"run_id": d.runs["C01"]},
         "search_policy": {"run_id": d.runs["C01"], "query": "freight"},
         "propose": {"run_id": d.runs["C01"], "proposals": d.proposals["C01"]},
+        "cannot_propose": {"run_id": d.runs["C01"], "reason": "model_timeout"},
         "list_pending_approvals": {},
         "get_approval_view": {"audit_id": d.pending},
         "decide": {"audit_id": d.pending, "decision": "approve"},

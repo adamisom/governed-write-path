@@ -58,6 +58,8 @@ RUN_LEASE_SECONDS = 300
 DISPATCH_LEASE_SECONDS = 3600 + RUN_LEASE_SECONDS
 # A run parked for an outside agent's proposal waits this long. Then the sweep ends it as "needs human".
 PROPOSAL_LEASE_SECONDS = 3600
+# Why an outside agent may hand a parked run to a person: the built-in proposer's failure reasons, and "unclear".
+CANNOT_PROPOSE_REASONS = frozenset({"model_timeout", "model_throttled", "model_error", "invalid_proposal", "unclear"})
 
 
 class NotAllowed(Exception):
@@ -480,6 +482,31 @@ class Orchestrator:
             return self._submit(tenant_id, run, raw, principal, trace, t0)
         except Exception as exc:  # noqa: BLE001 - fail closed on any bug
             return self._fail_closed(tenant_id, run_id, trace, t0, exc)
+
+    def cannot_propose(self, tenant_id: str, run_id: str, reason: str, principal: Principal) -> RunResult:
+        """The agent can't propose, e.g. its own model calls failed: the run goes to a person now.
+
+        The reason comes from a closed list, the same failure reasons the built-in proposer's loop records, and the
+        outcome is always NEEDS_HUMAN with a task, so nothing an agent says here can cause a write. The run and its
+        task are written in one transaction, as in `resume`. A run that already left `awaiting_proposal` is
+        returned as it is.
+        """
+        self._require_agent(principal)
+        if reason not in CANNOT_PROPOSE_REASONS:
+            raise NotAllowed(f"reason must be one of {', '.join(sorted(CANNOT_PROPOSE_REASONS))}")
+        run = self.store.get_run(tenant_id, run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if run["state"] != "awaiting_proposal":
+            return self._current(run)
+        now = self.clock.now()
+        if not self.store.finalize_run_with_task(
+                tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN, "reason": reason,
+                                    "ended_at": now, "reported_by": principal.principal_id},
+                (f"finalized:{RunOutcome.NEEDS_HUMAN}", now), self._task(tenant_id, run_id, reason),
+                expect_state="awaiting_proposal"):
+            return self._current(self.store.get_run(tenant_id, run_id) or run)
+        return RunResult(run_id, RunOutcome.NEEDS_HUMAN, reason)
 
     def _submit(self, tenant_id: str, run: dict, raw: dict, principal: Principal, trace: dict,
                 t0: float) -> RunResult:

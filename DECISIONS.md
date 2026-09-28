@@ -438,3 +438,19 @@ Source: build, 9/28.
 
 - **Context.** `mcp` 2.2.0 is the latest (9/7/26), but Strands 1.57.0 requires `mcp>=1.23,<2.2`.
 - **Choice.** `mcp>=2.1,<2.2` in the optional `mcp` extra. 2.1.1 has the same server API (`MCPServer`), auth and built-in OpenTelemetry as 2.2.0 for everything used here.
+
+## M7. An agent that can't propose hands the run to a person at once
+
+Source: replaying the 108 cases through the MCP server, 9/28.
+
+- **Context.** L04 to L06 give the built-in proposer two timeouts, a throttle, or two text answers without a proposal. The built-in loop records the failure and ends the run as NEEDS_HUMAN with that reason. Through MCP, the proposer's model runs in the agent's process, so the server never saw the failure, and the run waited an hour for its deadline and ended as `proposal_timeout`.
+- **Choice.** An agent-only tool, `cannot_propose(run_id, reason)`, with the reason from a closed list: the built-in loop's failure reasons (`model_timeout`, `model_throttled`, `model_error`, `invalid_proposal`) and `unclear`. The run and its task are written in one transaction, as in `resume`, the outcome is always NEEDS_HUMAN, and a run that has moved on is returned as it is.
+- **Why.** A person hears about a stuck run at once, not an hour later, and nothing an agent says through this tool can cause a write.
+
+## M8. Every graded case replays through the MCP server, with two stated adjustments
+
+Source: build, 9/28.
+
+- **Choice.** `evals/mcp_runner.py` runs each case with the orchestrator in external-proposal mode and an MCP client per role, and grades it with the unchanged grader. `gwp mcp replay` compares each verdict with the direct run's and exits 1 on any difference, and CI runs it. Two checks are adjusted, both because the proposer's model calls happen in the agent's process: the expected count of model calls stored on the run is lowered by the direct run's proposer calls, and a case's minimum latency is dropped when the direct run's proposer had a failed call, since the wait before the retry is then the agent's.
+- **Result.** 108 of 108 with the same verdict on both scripts. The cooperative script passes all 108, and the adversarial one gets through on exactly I06, I11, I16 and I18, as in the direct run and as predicted before any code.
+- **Found by it.** The first replay failed L03 because a run's latency in external mode started at the proposal and left out the reader's retry. The latency now counts the server's time before parking plus its time after the proposal arrives, and leaves out the wait for the agent.

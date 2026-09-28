@@ -1,6 +1,6 @@
 # governed-write-path
 
-Status: v0 spike, written in one day. The write path, the agents, the 108-case eval set and the offline evals all run. The eval set grew from 53 to 108 cases on 9/28/26, with every new expected outcome committed before its first run (entry 46). An independent audit on 9/25/26 found two high and six medium problems, and all of them are fixed (see `DECISIONS.md` entries 29 to 39). Three Codex reviews followed. They found a killed worker could strand a run, a gap in how the grader checked ledger entries, a race that could open the same task for a person twice, and a crash that could finalize a run before its task for a person existed, and all four are fixed (entries 40 to 44). Planning the new cases found one more, a run that could say PENDING_APPROVAL after its approved write applied, and it is fixed (entry 45). No live model has been called yet, because there are no credentials on the machine it was built on, and the Terraform has never been applied.
+Status: v0 spike, written in one day. The write path, the agents, the 108-case eval set and the offline evals all run. The eval set grew from 53 to 108 cases on 9/28/26, with every new expected outcome committed before its first run (entry 46). An independent audit on 9/25/26 found two high and six medium problems, and all of them are fixed (see `DECISIONS.md` entries 29 to 39). Three Codex reviews followed. They found a killed worker could strand a run, a gap in how the grader checked ledger entries, a race that could open the same task for a person twice, and a crash that could finalize a run before its task for a person existed, and all four are fixed (entries 40 to 44). Planning the new cases found one more, a run that could say PENDING_APPROVAL after its approved write applied, and it is fixed (entry 45). No live model has been called yet, because there are no credentials on the machine it was built on, and the Terraform has never been applied. The same write path also runs as an MCP server, and all 108 cases give the same verdict when replayed through it (see The MCP server).
 
 An AI agent reads an uploaded supplier invoice, looks up the purchase order, receipt, contract and written policy that apply, and proposes a change to a small accounts payable ledger. The agent can only propose. Plain code checks every proposal against the records, gives it an authority tier (apply automatically, needs a person's approval, or forbidden), writes an audit record before the change is visible, applies each change exactly once, and can undo it with a compensating entry. The eval harness measures how often the result is right, how often an unsafe write gets through, how often an injected instruction works, and what each run costs.
 
@@ -101,13 +101,13 @@ The defaults are Claude Haiku 4.5 as the reader and Claude Sonnet 5 as the propo
 
 ## The MCP server
 
-The write path also runs as an [MCP](https://modelcontextprotocol.io) server, so an outside agent can be the proposer. The orchestrator runs in external-proposal mode: an uploaded document is read by the quarantined reader and its records are looked up, and then the run waits for an agent's proposal instead of calling the built-in proposer. The agent gets exactly what the built-in proposer would be shown, the typed fields labeled untrusted and the records code looked up, and never the document text. Its proposal goes through the same validation, policy check, tier, audit record and transaction. An invalid proposal gets the errors back and one more try, a repeated proposal changes nothing, and a run nobody proposes for within an hour goes to a person.
+The write path also runs as an [MCP](https://modelcontextprotocol.io) server, so an outside agent can be the proposer. The orchestrator runs in external-proposal mode: an uploaded document is read by the quarantined reader and its records are looked up, and then the run waits for an agent's proposal instead of calling the built-in proposer. The agent gets exactly what the built-in proposer would be shown, the typed fields labeled untrusted and the records code looked up, and never the document text. Its proposal goes through the same validation, policy check, tier, audit record and transaction. An invalid proposal gets the errors back and one more try, a repeated proposal changes nothing, and a run nobody proposes for within an hour goes to a person. An agent that can't propose, e.g. because its own model calls failed, calls `cannot_propose` to hand the run to a person at once.
 
 Each write verb belongs to one role, and the role comes from the caller's key, never from a tool argument:
 
 | Tool | agent | approver | admin |
 | --- | --- | --- | --- |
-| `list_work`, `get_proposal_context`, `search_policy`, `propose` | yes | no | no |
+| `list_work`, `get_proposal_context`, `search_policy`, `propose`, `cannot_propose` | yes | no | no |
 | `list_pending_approvals`, `get_approval_view`, `decide` | no | yes | no |
 | `revert` | no | no | yes |
 | `get_run`, `list_runs`, `get_audit` | yes | yes | yes |
@@ -125,6 +125,12 @@ Or serve the demo and connect any MCP client. The demo keys are `demo-agent-key`
 ```sh
 uv run gwp mcp serve --demo --transport http --port 8765   # clients send "Authorization: Bearer demo-agent-key"
 uv run gwp mcp serve --demo --transport stdio --key demo-agent-key
+```
+
+Every graded case also runs through the MCP server. The replay puts the orchestrator in external-proposal mode and turns each case's scripted proposer turns into MCP calls from an agent key, its approvals into `decide` calls from an approver key, and its reverts into `revert` calls from an admin key, and the same grader grades the result. All 108 cases get the same verdict as the direct run with both scripts: the cooperative script passes 108 of 108, and the adversarial one again gets through on exactly I06, I11, I16 and I18. Two checks are adjusted, because the proposer's model calls happen in the agent's process and not the server's: the count of model calls stored on the run, and the minimum run latency for a case whose proposer call failed (`evals/mcp_runner.py` says how). CI runs the replay and fails if any verdict differs:
+
+```sh
+uv run gwp mcp replay --out eval-out    # writes eval-out/mcp-replay.md and .json
 ```
 
 Without `--demo`, the server uses the DynamoDB tables, bucket and reader model from the same environment variables as the Lambda, and keys from `GWP_API_KEYS`. That path has never been run. The MCP SDK is pinned to 2.1.x, because Strands 1.57.0 requires `mcp<2.2`.

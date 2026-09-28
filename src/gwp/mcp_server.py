@@ -7,7 +7,7 @@ and its proposal goes through the same validation, policy check, tier, audit and
 
 Tools, and the one role that may call each write verb (see `gwp.access.TOOL_ROLES`):
 
-    agent      list_work, get_proposal_context, search_policy, propose
+    agent      list_work, get_proposal_context, search_policy, propose, cannot_propose
     approver   list_pending_approvals, get_approval_view, decide
     admin      revert
     any role   get_run, list_runs, get_audit
@@ -201,6 +201,17 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
         _span(outcome=res.outcome, reason=res.reason, audit_count=len(res.audit_ids))
         return {"run_id": res.run_id, "outcome": res.outcome, "reason": res.reason, "audit_ids": res.audit_ids,
                 "validation_errors": res.detail}
+
+    @server.tool(description="Hand a run you can't propose for to a person now, instead of letting it wait for "
+                             "its deadline. reason is one of model_timeout, model_throttled, model_error, "
+                             "invalid_proposal or unclear. The run ends as NEEDS_HUMAN with a task; nothing is "
+                             "written.")
+    def cannot_propose(run_id: str, reason: str) -> dict[str, Any]:
+        c = guard("cannot_propose", run_id=run_id)
+        res = call(c, "cannot_propose", lambda: orch.cannot_propose(c.tenant_id, run_id, reason, c.principal),
+                   run_id=run_id)
+        _span(outcome=res.outcome, reason=res.reason)
+        return {"run_id": res.run_id, "outcome": res.outcome, "reason": res.reason}
 
     # -- the approver ---------------------------------------------------------------------------------
 

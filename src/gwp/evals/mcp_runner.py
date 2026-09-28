@@ -11,9 +11,12 @@ are not agent or approver actions. The same grader grades the result.
 If the script ends without an accepted proposal, the agent has given up. The harness moves the clock past the
 proposal deadline and runs the sweep, which is what happens to a real run nobody proposes for.
 
-One check is adjusted, and only one. A case's `model_calls` counts the model calls stored on the run. In MCP mode
-the proposer's calls happen in the agent's own process, so the server stores only the reader's. The expected count
-is lowered by the number of proposer calls the direct run of the same case made.
+If the agent's own model calls fail, or its model answers without proposing, the agent calls `cannot_propose` with
+the same reason the built-in proposer's loop would record, and the run goes to a person at once.
+
+Two checks are adjusted, both because the proposer runs in the agent's own process (see `mcp_expectations`): the
+count of model calls stored on the run, and, for a case whose proposer call failed, the minimum run latency that
+proves the built-in proposer waited before its retry.
 """
 
 from __future__ import annotations
@@ -90,11 +93,16 @@ class McpHarness(_Harness):
     def _agent(self, run_id: str, turns: list[dict]) -> str:
         """The scripted agent: read the context, search, propose. Returns the run outcome."""
         seen = [INSTRUCTIONS, self._context(run_id)]
+        failure: str | None = None  # why the agent's last model call produced no proposal
         for turn in turns:
             while "if_seen" in turn:
                 turn = turn["then"] if turn["if_seen"] in "\n".join(seen) else turn["else"]
+            if "raise" in turn:
+                failure = {"timeout": "model_timeout", "throttle": "model_throttled"}.get(turn["raise"], "model_error")
+                continue  # the agent's own model call failed; it retries on its side
             if "tool" not in turn:
-                continue  # a model call that ended without a tool call, or failed: no proposal this time
+                failure = "invalid_proposal"  # the model answered without proposing
+                continue
             if turn["tool"] == "search_policy":
                 hits = self.mcp(Role.agent, "search_policy", {"run_id": run_id, "query": turn["input"]["query"]})
                 seen.append(json.dumps(hits))
@@ -107,8 +115,12 @@ class McpHarness(_Harness):
                                                    if isinstance(proposals, list) else [raw]})
             if out["outcome"] != RunOutcome.AWAITING_PROPOSAL:
                 return out["outcome"]
+            failure = None  # the server counted this attempt and has the run waiting for the retry
             seen.append(self._context(run_id))  # the retry sees the validation errors
-        # The agent gave up. The proposal deadline passes and the sweep ends the run.
+        if failure is not None:
+            # The agent knows why it can't propose, so it hands the run to a person now.
+            return self.mcp(Role.agent, "cannot_propose", {"run_id": run_id, "reason": failure})["outcome"]
+        # The agent stopped without a word. The proposal deadline passes and the sweep ends the run.
         self.clock.advance(PROPOSAL_LEASE_SECONDS + 60)
         self.orch.recover_stranded()
         return (self.store.get_run(self.case.tenant, run_id) or {}).get("outcome") or ""
@@ -183,12 +195,28 @@ def proposer_calls(run: CaseRun) -> int:
     return sum(1 for c in (run.runs[-1].get("model_calls") or []) if c.get("step") == "proposer") if run.runs else 0
 
 
+def proposer_failed(run: CaseRun) -> bool:
+    return any(c.get("step") == "proposer" and c.get("status") not in (None, "ok")
+               for r in run.runs for c in (r.get("model_calls") or []))
+
+
 def mcp_expectations(case: Case, direct: CaseRun) -> Case:
-    """The case with its one MCP-mode adjustment: the proposer's model calls are not stored on the server's run."""
-    if "model_calls" not in case.expect:
+    """The case with the MCP-mode adjustments. Both follow from the proposer running in the agent's process:
+
+    - `model_calls`: the server stores only its own model calls, so the expected count is lowered by the proposer
+      calls the direct run made.
+    - `min_latency_ms`: when the direct run's proposer had a failed call, its wait before the retry was inside the
+      server's run; in MCP mode the agent waits on its side, so the check is dropped for that case.
+    """
+    exp = dict(case.expect)
+    if "model_calls" in exp:
+        exp["model_calls"] -= proposer_calls(direct)
+    if "min_latency_ms" in exp and proposer_failed(direct):
+        del exp["min_latency_ms"]
+    if exp == case.expect:
         return case
     adjusted = copy.copy(case)
-    adjusted.expect = {**case.expect, "model_calls": case.expect["model_calls"] - proposer_calls(direct)}
+    adjusted.expect = exp
     return adjusted
 
 
