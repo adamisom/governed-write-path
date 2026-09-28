@@ -383,6 +383,31 @@ class DynamoStore:
             raise
         return True
 
+    def append_to_run(self, tenant_id: str, run_id: str, lists: dict[str, list], expect_state: str) -> bool:
+        """Append to list fields on a run, only while it is in `expect_state`. Returns False if it had moved on.
+
+        An append, not a read and a write, so two calls at once both land.
+        """
+        names: dict[str, str] = {"#state": "state"}
+        values: dict[str, Any] = {":expect_state": expect_state, ":empty": []}
+        sets = []
+        for i, (k, v) in enumerate(lists.items()):
+            names[f"#l{i}"] = k
+            values[f":l{i}"] = v
+            sets.append(f"#l{i} = list_append(if_not_exists(#l{i}, :empty), :l{i})")
+        try:
+            self.client.update_item(
+                TableName=self.tables[RECORDS],
+                Key=serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
+                UpdateExpression="SET " + ", ".join(sets),
+                ConditionExpression="attribute_exists(pk) AND #state = :expect_state",
+                ExpressionAttributeNames=names, ExpressionAttributeValues=serialize_values(values))
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
+
     def finalize_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
                                task: dict, expect_state: str | None = None) -> bool:
         """Finalize a run and open its task for a person in one transaction. Returns False if the run had left

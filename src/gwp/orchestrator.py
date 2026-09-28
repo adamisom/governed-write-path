@@ -56,10 +56,16 @@ MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
 RUN_LEASE_SECONDS = 300
 # Before a worker claims it, the lease covers the async event's maximum age (3600 seconds) plus one run.
 DISPATCH_LEASE_SECONDS = 3600 + RUN_LEASE_SECONDS
+# A run parked for an outside agent's proposal waits this long. Then the sweep ends it as "needs human".
+PROPOSAL_LEASE_SECONDS = 3600
 
 
 class NotAllowed(Exception):
     pass
+
+
+class NotAwaitingProposal(Exception):
+    """An agent asked for a run's proposal context, or searched for it, after the run left `awaiting_proposal`."""
 
 
 class InvalidDecision(Exception):
@@ -80,6 +86,7 @@ class RunResult:
     outcome: str
     reason: str | None
     audit_ids: list[str] = field(default_factory=list)
+    detail: str | None = None  # validation errors for an agent's invalid proposal, which it may retry once
 
 
 @dataclass
@@ -123,7 +130,7 @@ class Orchestrator:
     def __init__(self, store: DynamoStore, blobs: BlobStore, reader: Reader, proposer: Proposer,
                  clock: Clock | None = None, ids: Ids | None = None, executor: Executor | None = None,
                  retriever_factory: Callable[[str], Retriever] | None = None, backoff_s: float = 2.0,
-                 search_enabled: bool = True):
+                 search_enabled: bool = True, external_proposals: bool = False):
         self.store = store
         self.blobs = blobs
         self.reader = reader
@@ -134,6 +141,9 @@ class Orchestrator:
         self.retriever_factory = retriever_factory or (lambda t: BM25Retriever(t, store.list_chunks(t)))
         self.backoff_s = backoff_s
         self.search_enabled = search_enabled
+        # With external proposals, `process` stops after step 5 and an outside agent proposes through
+        # `proposal_context`, `search_policy` and `submit_proposal`. The internal proposer is not called.
+        self.external_proposals = external_proposals
 
     # -- step 1: upload ------------------------------------------------------------
 
@@ -179,6 +189,8 @@ class Orchestrator:
             if run.get("lease_until") and run["lease_until"] < self.clock.now():
                 # The worker that claimed this run is gone, since a lease outlasts the Lambda timeout.
                 return self.resume(tenant_id, run_id)
+            if run["state"] == "awaiting_proposal":
+                return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, run.get("retry_feedback"))
             # Another worker holds this run. Say so instead of returning an empty outcome.
             return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
         t0 = self.clock.monotonic()
@@ -186,18 +198,21 @@ class Orchestrator:
         try:
             return self._process(tenant_id, run, trace, t0)
         except Exception as exc:  # noqa: BLE001 - fail closed on any bug
-            # Say honestly what exists: an exception after a commit leaves that write applied and audited.
-            audits = self.store.list_audits(tenant_id, run_id)
-            applied = [a["audit_id"] for a in audits if a["status"] == "applied"]
-            current = self.store.get_run(tenant_id, run_id) or {}
-            if current.get("route") == "human":
-                # Step 10 may have closed the routed records and then failed to open the task. Open it before the
-                # run is finalized: finalizing drops the lease, and closed records are not open, so nothing else
-                # would. If this fails too, the error leaves the run leased and the sweep finishes it.
-                self._open_task(tenant_id, run_id, current.get("route_reason") or "interrupted")
-            return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "internal_error", trace, t0,
-                                [a["audit_id"] for a in audits],
-                                extra={"error": repr(exc)[:500], "applied_audit_ids": applied})
+            return self._fail_closed(tenant_id, run_id, trace, t0, exc)
+
+    def _fail_closed(self, tenant_id: str, run_id: str, trace: dict, t0: float, exc: Exception) -> RunResult:
+        # Say honestly what exists: an exception after a commit leaves that write applied and audited.
+        audits = self.store.list_audits(tenant_id, run_id)
+        applied = [a["audit_id"] for a in audits if a["status"] == "applied"]
+        current = self.store.get_run(tenant_id, run_id) or {}
+        if current.get("route") == "human":
+            # Step 10 may have closed the routed records and then failed to open the task. Open it before the
+            # run is finalized: finalizing drops the lease, and closed records are not open, so nothing else
+            # would. If this fails too, the error leaves the run leased and the sweep finishes it.
+            self._open_task(tenant_id, run_id, current.get("route_reason") or "interrupted")
+        return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "internal_error", trace, t0,
+                            [a["audit_id"] for a in audits],
+                            extra={"error": repr(exc)[:500], "applied_audit_ids": applied})
 
     def _process(self, tenant_id: str, run: dict, trace: dict, t0: float) -> RunResult:
         run_id = run["run_id"]
@@ -244,6 +259,10 @@ class Orchestrator:
         # Step 5: retrieve by key.
         ctx = self._keyed_context(tenant_id, policy, run["document_id"], extraction, flags, trace)
 
+        if self.external_proposals:
+            # An outside agent proposes, over MCP. Park the run with what it needs; `submit_proposal` goes on.
+            return self._park(tenant_id, run_id, trace)
+
         # Step 6 and 7: propose and validate. One retry for an invalid proposal or a failed call.
         retriever = self.retriever_factory(tenant_id) if self.search_enabled else None
         feedback: str | None = None
@@ -272,26 +291,39 @@ class Orchestrator:
             if pr.raw is None:
                 feedback = "no propose_write call"
                 continue
-            try:
-                ps = ProposalSet.model_validate(pr.raw)
-            except ValidationError as ve:
-                feedback = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
-                                     for err in ve.errors()[:5])
-                trace["proposal_attempts"][-1]["error"] = feedback
-                continue
-            refs = validate_references(ps, tenant_id, self.store)
-            if refs.cross_tenant:
-                proposal_set, cross_tenant = ps, refs.cross_tenant
+            proposal_set, cross_tenant, feedback = self._validate_proposal(tenant_id, pr.raw, trace)
+            if proposal_set is not None:
                 break
-            if refs.unknown:
-                feedback = f"unknown ids: {', '.join(refs.unknown)}"
-                trace["proposal_attempts"][-1]["error"] = feedback
-                continue
-            proposal_set = ps
-            break
         if proposal_set is None:
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, failure, trace, t0)
+        return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
+                            trace, t0)
 
+    def _validate_proposal(self, tenant_id: str, raw: dict, trace: dict
+                           ) -> tuple[ProposalSet | None, list[str], str | None]:
+        """Step 7: the schema, then every referenced id. Returns (set, cross-tenant ids, feedback for a retry).
+
+        A reference to another tenant's record is not retried: the set goes on, and step 8 routes it to a person.
+        """
+        try:
+            ps = ProposalSet.model_validate(raw)
+        except ValidationError as ve:
+            feedback = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in ve.errors()[:5])
+            trace["proposal_attempts"][-1]["error"] = feedback
+            return None, [], feedback
+        refs = validate_references(ps, tenant_id, self.store)
+        if refs.cross_tenant:
+            return ps, refs.cross_tenant, None
+        if refs.unknown:
+            feedback = f"unknown ids: {', '.join(refs.unknown)}"
+            trace["proposal_attempts"][-1]["error"] = feedback
+            return None, [], feedback
+        return ps, [], None
+
+    def _decide(self, tenant_id: str, run_id: str, doc: dict, extraction: Extraction, ctx: KeyedContext,
+                proposal_set: ProposalSet, cross_tenant: list[str], policy: dict, tenant: dict, trace: dict,
+                t0: float) -> RunResult:
+        """Steps 8 to 12 for a valid proposal set, the same whether the internal proposer or an agent made it."""
         # Step 8: policy check and tier.
         if cross_tenant:
             decision = None
@@ -342,6 +374,139 @@ class Orchestrator:
         errors = ",".join(r.error or r.status for r in results if r.status not in ("applied", "already_applied"))
         return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "apply_failed", trace, t0, audit_ids,
                             decision, extra={"error": errors})
+
+    # -- external proposals: an outside agent proposes, e.g. over MCP ----------------------------------
+
+    def _park(self, tenant_id: str, run_id: str, trace: dict) -> RunResult:
+        """The end of step 5 in external-proposal mode. The run waits, leased, for an agent's proposal.
+
+        The extraction and the step 3 and 5 trace are kept on the run, so `submit_proposal` can go on from here in
+        another process. If no proposal arrives before the lease runs out, the sweep ends the run as needing a
+        person, with the reason `proposal_timeout`.
+        """
+        now = self.clock.now()
+        fields = {"state": "awaiting_proposal", "outcome": RunOutcome.AWAITING_PROPOSAL,
+                  "extraction": trace["extraction"], "extraction_flags": trace["extraction_flags"],
+                  "model_calls": trace["model_calls"], "retrieved": trace["retrieved"], "searches": [],
+                  "proposal_attempts": [], "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS)}
+        if not self.store.update_run(tenant_id, run_id, fields, ("awaiting_proposal", now),
+                                     expect_state="text_extracted"):
+            return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
+        return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, None)
+
+    @staticmethod
+    def _require_agent(principal: Principal) -> None:
+        if principal.role != Role.agent:
+            raise NotAllowed("proposing needs the agent role")
+
+    @staticmethod
+    def _current(run: dict) -> RunResult:
+        outcome = run.get("outcome") if run.get("state") in ("finalized", "awaiting_proposal") else None
+        return RunResult(run["run_id"], outcome or RunOutcome.IN_PROGRESS, run.get("reason"), run.get("audit_ids", []))
+
+    def _parked(self, tenant_id: str, run_id: str) -> dict:
+        run = self.store.get_run(tenant_id, run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if run["state"] != "awaiting_proposal":
+            raise NotAwaitingProposal(f"run {run_id} is not waiting for a proposal (state {run['state']}, "
+                                      f"outcome {run.get('outcome')})")
+        return run
+
+    def awaiting_proposals(self, tenant_id: str, principal: Principal) -> list[dict]:
+        """The agent's work queue: this tenant's runs parked for a proposal, oldest first."""
+        self._require_agent(principal)
+        runs = [r for r in self.store.list_runs(tenant_id) if r.get("state") == "awaiting_proposal"]
+        return [{"run_id": r["run_id"], "document_id": r["document_id"], "started_at": r["started_at"],
+                 "proposal_deadline": r.get("lease_until")} for r in sorted(runs, key=lambda r: r["started_at"])]
+
+    def proposal_context(self, tenant_id: str, run_id: str, principal: Principal) -> dict:
+        """What the internal proposer would be shown, as data: typed fields and the records code looked up.
+
+        The records are looked up again now, so they are current. No document text is in here, and no free text
+        stored from an earlier document (`_render_records`), so an outside agent sees what the internal one sees.
+        """
+        self._require_agent(principal)
+        run = self._parked(tenant_id, run_id)
+        extraction = Extraction.model_validate(run["extraction"])
+        ctx = self._keyed_context(tenant_id, tenant_policy(self.store, tenant_id), run["document_id"], extraction,
+                                  run.get("extraction_flags", []), {"retrieved": []})
+        return {"run_id": run_id, "document_id": run["document_id"],
+                "attempt": len(run.get("proposal_attempts") or []) + 1, "vendor_note": ctx.vendor_note,
+                "extracted_fields_untrusted": extraction.model_dump(mode="json"),
+                "records_trusted": self._render_records(ctx), "retry_feedback": run.get("retry_feedback"),
+                "search_enabled": self.search_enabled}
+
+    def search_policy(self, tenant_id: str, run_id: str, query: str, principal: Principal) -> list[dict]:
+        """The proposer's read-only policy search, bound to the caller's tenant and logged on the run."""
+        self._require_agent(principal)
+        self._parked(tenant_id, run_id)
+        if not self.search_enabled:
+            raise NotAllowed("search is disabled for this service")
+        q = str(query)[:200]
+        hits = self.retriever_factory(tenant_id).search(q, k=3)
+        entry = {"query": q, "hits": [{"chunk_id": h.chunk_id, "doc_id": h.doc_id, "version": h.version,
+                                       "score": h.score} for h in hits]}
+        self.store.append_to_run(tenant_id, run_id, {"searches": [entry]}, expect_state="awaiting_proposal")
+        return [{"chunk_id": h.chunk_id, "text": h.text} for h in hits]
+
+    def submit_proposal(self, tenant_id: str, run_id: str, raw: dict, principal: Principal) -> RunResult:
+        """Steps 7 to 12 for a proposal set an outside agent sent, through the same code as the internal path.
+
+        The run is claimed with a conditional update from `awaiting_proposal`, so of two calls only one proposes,
+        and a repeated call returns the run's current state. An invalid set gets one retry with the errors fed
+        back, as the internal proposer does, and a second invalid set ends the run as needing a person.
+        """
+        self._require_agent(principal)
+        run = self.store.get_run(tenant_id, run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if run["state"] != "awaiting_proposal":
+            return self._current(run)
+        now = self.clock.now()
+        if run.get("lease_until") and run["lease_until"] < now:
+            return self.resume(tenant_id, run_id)  # the proposal came too late; the run goes to a person
+        if not self.store.update_run(tenant_id, run_id, {"state": "proposing", "proposed_by": principal.principal_id,
+                                                         "lease_until": iso_plus(now, RUN_LEASE_SECONDS)},
+                                     ("proposing", now), expect_state="awaiting_proposal"):
+            return self._current(self.store.get_run(tenant_id, run_id) or run)
+        t0 = self.clock.monotonic()
+        trace: dict = {k: list(run.get(k) or []) for k in ("model_calls", "retrieved", "searches", "proposal_attempts")}
+        trace["extraction"], trace["extraction_flags"] = run["extraction"], list(run.get("extraction_flags") or [])
+        try:
+            return self._submit(tenant_id, run, raw, principal, trace, t0)
+        except Exception as exc:  # noqa: BLE001 - fail closed on any bug
+            return self._fail_closed(tenant_id, run_id, trace, t0, exc)
+
+    def _submit(self, tenant_id: str, run: dict, raw: dict, principal: Principal, trace: dict,
+                t0: float) -> RunResult:
+        run_id = run["run_id"]
+        attempt = len(trace["proposal_attempts"]) + 1
+        trace["proposal_attempts"].append({"attempt": attempt, "raw": raw, "tools": ["propose"],
+                                           "by": principal.principal_id})
+        doc = self.store.get_document(tenant_id, run["document_id"])
+        assert doc is not None
+        policy = tenant_policy(self.store, tenant_id)
+        tenant = self.store.get_tenant(tenant_id) or {}
+        extraction = Extraction.model_validate(run["extraction"])
+        # Step 5 again, so step 8 checks against the records as they are now, not as they were when the run parked.
+        keyed: dict = {"retrieved": []}
+        ctx = self._keyed_context(tenant_id, policy, run["document_id"], extraction, trace["extraction_flags"], keyed)
+        trace["retrieved"] = keyed["retrieved"] + [
+            {"kind": "policy_chunk", "id": h["chunk_id"], "version": h["version"], "score": h["score"],
+             "query": s["query"]} for s in trace["searches"] for h in s["hits"]]
+        proposal_set, cross_tenant, feedback = self._validate_proposal(tenant_id, raw, trace)
+        if proposal_set is None:
+            if attempt < 2:
+                now = self.clock.now()
+                self.store.update_run(tenant_id, run_id, {"state": "awaiting_proposal", "retry_feedback": feedback,
+                                                          "proposal_attempts": trace["proposal_attempts"],
+                                                          "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS)},
+                                      ("awaiting_proposal", now), expect_state="proposing")
+                return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, "invalid_proposal", detail=feedback)
+            return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "invalid_proposal", trace, t0)
+        return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
+                            trace, t0)
 
     # -- step 5 helpers ---------------------------------------------------------------
 
@@ -546,12 +711,14 @@ class Orchestrator:
             # update is conditional on the state read here, so a worker that claims the run meanwhile wins. The
             # run and its task are written in one transaction: finalizing drops the lease, so a crash between two
             # separate writes left a finalized run with no task and nothing that would ever open it.
+            # A run parked for an outside agent that never proposed ends the same way, under its own reason.
+            reason = "proposal_timeout" if run["state"] == "awaiting_proposal" else "interrupted"
             if not self.store.finalize_run_with_task(
                     tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
-                                        "reason": "interrupted"}, ("finalized_on_resume", now),
-                    self._task(tenant_id, run_id, "interrupted"), expect_state=run["state"]):
+                                        "reason": reason}, ("finalized_on_resume", now),
+                    self._task(tenant_id, run_id, reason), expect_state=run["state"]):
                 return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
-            return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted")
+            return RunResult(run_id, RunOutcome.NEEDS_HUMAN, reason)
         audit_ids = [a["audit_id"] for a in audits]
         if not run.get("audit_set_complete"):
             for a in audits:

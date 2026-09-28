@@ -107,6 +107,8 @@ class RunOutcome(StrEnum):
     ROUTED_TO_HUMAN = "ROUTED_TO_HUMAN"
     NEEDS_HUMAN = "NEEDS_HUMAN"
     DUPLICATE_UPLOAD = "DUPLICATE_UPLOAD"
+    # A run in external-proposal mode, read and parked after step 5 until an agent proposes over MCP.
+    AWAITING_PROPOSAL = "AWAITING_PROPOSAL"
     # Returned by `process` for a run another worker is processing. Never stored as a run's outcome.
     IN_PROGRESS = "IN_PROGRESS"
 
@@ -332,6 +334,8 @@ class Role(StrEnum):
     approver = "approver"
     admin = "admin"
     service = "service"
+    # An outside agent, e.g. one connected over MCP. It can read a parked run's context and propose, nothing else.
+    agent = "agent"
 
 
 class Principal(BaseModel):
