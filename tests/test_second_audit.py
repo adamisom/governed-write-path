@@ -180,3 +180,19 @@ def test_an_approval_call_on_a_routed_record_leaves_the_run_routed(store):
     assert (after["outcome"], after["reason"]) == ("ROUTED_TO_HUMAN", "forbidden_action")
     assert after["history"] == before["history"]
     assert len(store.list_payables("T1", "V-101")) == 1
+
+
+# -- GWP2-3: an approved payable whose lines don't sum to its total posted an unbalanced entry ------------------------
+
+
+def test_an_approved_payable_whose_lines_do_not_sum_to_its_total_fails_instead_of_posting(store):
+    orch, res, _, _ = run_doc(store, C01_DOC, [c01_post(params={"total_cents": 90000})])
+    assert (res.outcome, res.reason) == ("PENDING_APPROVAL", "proposal_extraction_mismatch")
+    aid = res.audit_ids[0]
+    ledger_before = store.list_ledger("T1")
+    assert orch.approve("T1", aid, APPROVER, "approve").status == "failed"
+    audit = store.get_audit("T1", aid)
+    assert audit["status"] == "failed" and audit["error"].startswith("plan_failed:PlanError")
+    assert len(store.list_payables("T1", "V-101")) == 1
+    assert store.list_ledger("T1") == ledger_before
+    assert store.get_run("T1", res.run_id)["outcome"] == "NEEDS_HUMAN"

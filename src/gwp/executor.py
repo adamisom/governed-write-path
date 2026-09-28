@@ -161,6 +161,11 @@ class Executor:
         s = self.store
         prm = audit["params"]
         lines = audit["apply_input"]["lines"]
+        line_sum = sum(ln["amount_cents"] for ln in lines)
+        if line_sum != prm["total_cents"]:
+            # The entry debits each line and credits the total, so it would not balance. An approval can't fix the
+            # numbers, so the write fails instead of posting (DECISIONS entry 49).
+            raise PlanError(f"lines sum to {line_sum}, total is {prm['total_cents']}")
         pk = tenant_pk(tenant_id)
         payable_id = self.ids.new("P")
         entry_id = self.ids.new("E")

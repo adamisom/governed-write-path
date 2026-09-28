@@ -507,3 +507,12 @@ Source: second Fable audit, 9/28/26 (GWP2-2).
 - **Evidence.** The audit's reproduction B, and a test that calls `approve` on both the routed post and the rejected forbidden action of one run.
 - **Choice.** The branch refreshes the outcome only when the record's status is one the approval path can produce: `approved`, `applied`, `failed` or `declined`. For any other status it returns the run's stored outcome and writes nothing.
 - **Alternative.** Make `_refresh_run_outcome` return early for a run whose route is `human`, as `resume` does. That keeps the rule in one function, but the question is whether the approver's call had anything to do with the run, and that depends on the record.
+
+## 49. A payable whose lines don't sum to its total fails at apply
+
+Source: second Fable audit, 9/28/26 (GWP2-3).
+
+- **Before.** The ledger entry debits each payable line and credits the payable's `total_cents`. The `matches_extraction` check fails when the lines don't sum to the total, but a failed check only raises the tier to approval. An approver who approved such a proposal got a payable whose total differed from its lines and a ledger entry whose debits and credits differed. The grader's per-entry check (entry 42) would flag the entry in an eval, but no case produced one, so the rule held only for eval output.
+- **Evidence.** The audit's reproduction E. A C01 proposal with a total of $900.00 against lines of $842.50 waited for approval and, once approved, posted debits of 84250 against credits of 90000. A test now approves the same proposal.
+- **Choice.** `_plan_post_payable` raises `PlanError` when the lines don't sum to `total_cents`, so the write fails with `plan_failed` and nothing is written. The tier rules are unchanged, so the proposal still goes to approval and the approver sees the mismatch.
+- **Still open.** An approver can't fix the numbers from the approval view, so such a proposal could go to a person instead of to approval. That changes a tier rule and the expected outcomes that depend on it, so it is not done.
