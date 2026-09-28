@@ -67,18 +67,25 @@ class McpHarness(_Harness):
     def proposer_prompts(self) -> list[str]:
         return list(self.shown)
 
+    def notes(self) -> dict:
+        return {"tool_calls": list(self.tool_calls)}
+
     # -- MCP calls --------------------------------------------------------------------------------
 
-    def mcp(self, role: Role, tool: str, args: dict) -> dict:
+    def mcp(self, role: Role, tool: str, args: dict, allow_error: bool = False) -> dict:
         from mcp import Client
 
         async def go():
             async with Client(self.servers[role]) as c:
                 return await c.call_tool(tool, args)
 
+        call = {"role": role.value, "tool": tool, "is_error": None}
+        self.tool_calls.append(call)  # counted before the call, so a call that crashes the server still counts
         res = anyio.run(go)
-        self.tool_calls.append({"role": role.value, "tool": tool, "is_error": res.is_error})
+        call["is_error"] = res.is_error
         if res.is_error:
+            if allow_error:
+                return {"error": res.content[0].text}
             raise ToolCallFailed(res.content[0].text)
         return res.structured_content or {}
 
@@ -108,7 +115,10 @@ class McpHarness(_Harness):
                 seen.append(json.dumps(hits))
                 continue
             if turn["tool"] != "propose_write":
-                continue  # a tool the agent doesn't have; the MCP server offers no such tool
+                # A tool the agent doesn't have. The call still goes to the server, which refuses it and records
+                # the refusal, as it would for a real client.
+                self.mcp(Role.agent, turn["tool"], turn.get("input") or {}, allow_error=True)
+                continue
             raw = turn["input"]
             proposals = raw.get("proposals") if isinstance(raw, dict) else None
             out = self.mcp(Role.agent, "propose", {"run_id": run_id, "proposals": proposals
@@ -227,12 +237,21 @@ class Parity:
     script: str
     direct: str
     via_mcp: str
-    same: bool
+    same: bool  # the verdict, the system-level injection result, the trail, the outcome and reason, the state change
     injection_system_direct: bool | None
     injection_system_mcp: bool | None
+    injection_model_direct: bool | None
+    injection_model_mcp: bool | None
+    tasks_direct: list[str] = field(default_factory=list)
+    tasks_mcp: list[str] = field(default_factory=list)
     mismatches_mcp: list[str] = field(default_factory=list)
-    tool_calls: int = 0
+    tool_calls: int = 0  # counted by the client
+    access_records: int = 0  # written by the server
     denied_calls: int = 0
+
+
+def _outcomes(run: CaseRun) -> list[tuple]:
+    return [(r.get("outcome"), r.get("reason")) for r in run.setup_runs + run.runs]
 
 
 def compare(case: Case, script: str) -> tuple[Grade, Grade, Parity]:
@@ -240,11 +259,16 @@ def compare(case: Case, script: str) -> tuple[Grade, Grade, Parity]:
     direct = grade(case, direct_run)
     mcp_run = run_case_via_mcp(case, script)
     via = grade(mcp_expectations(case, direct_run), mcp_run)
-    denied = sum(1 for r in mcp_run.final.values() if r.get("kind") == "access_record" and r["decision"] == "denied")
-    calls = sum(1 for r in mcp_run.final.values() if r.get("kind") == "access_record")
-    p = Parity(case.id, case.category, script, direct.verdict, via.verdict,
-               direct.verdict == via.verdict and direct.injection_system == via.injection_system,
-               direct.injection_system, via.injection_system, via.mismatches, calls, denied)
+    records = [r for r in mcp_run.final.values() if r.get("kind") == "access_record"]
+    same = (direct.verdict == via.verdict and direct.injection_system == via.injection_system
+            and direct_run.trail == mcp_run.trail and _outcomes(direct_run) == _outcomes(mcp_run)
+            and direct.diff == via.diff)
+    p = Parity(case.id, case.category, script, direct.verdict, via.verdict, same,
+               direct.injection_system, via.injection_system, direct.injection_model, via.injection_model,
+               sorted(t["reason_code"] for t in direct_run.human_tasks),
+               sorted(t["reason_code"] for t in mcp_run.human_tasks), via.mismatches,
+               len(mcp_run.notes.get("tool_calls", [])), len(records),
+               sum(1 for r in records if r["decision"] == "denied"))
     return direct, via, p
 
 
@@ -259,19 +283,30 @@ def report(parities: list[Parity]) -> tuple[str, dict]:
         ok = sum(p.via_mcp == "success" for p in ps)
         unsafe = sorted(p.case_id for p in ps if p.via_mcp == "unsafe")
         through = sorted(p.case_id for p in ps if p.injection_system_mcp)
+        calls, recorded = sum(p.tool_calls for p in ps), sum(p.access_records for p in ps)
         lines += [f"## {script}", "",
-                  f"- Same verdict as the direct run: {same} of {len(ps)}",
+                  f"- Same verdict, injection result, trail, outcome and state change as the direct run: "
+                  f"{same} of {len(ps)}",
                   f"- Success through MCP: {ok} of {len(ps)}",
                   f"- Unsafe through MCP: {', '.join(unsafe) or 'none'}",
                   f"- Attacks that changed a store through MCP: {', '.join(through) or 'none'}",
-                  f"- MCP tool calls: {sum(p.tool_calls for p in ps)}, all recorded; denied: "
-                  f"{sum(p.denied_calls for p in ps)}", ""]
+                  f"- MCP tool calls made by the clients: {calls}; access records written by the server: {recorded}; "
+                  f"denied: {sum(p.denied_calls for p in ps)}", ""]
         diffs = [p for p in ps if not p.same]
         if diffs:
             lines += ["| Case | Direct | Through MCP | Why |", "| --- | --- | --- | --- |"]
             lines += [f"| {p.case_id} | {p.direct} | {p.via_mcp} | {'; '.join(p.mismatches_mcp)[:300]} |"
                       for p in diffs]
             lines.append("")
+        other = [p for p in ps if p.injection_model_direct != p.injection_model_mcp or p.tasks_direct != p.tasks_mcp]
+        if other:
+            lines += ["Differences the verdict doesn't show:", "",
+                      "| Case | Model followed the attack (direct / MCP) | Tasks for a person (direct / MCP) |",
+                      "| --- | --- | --- |"]
+            lines += [f"| {p.case_id} | {p.injection_model_direct} / {p.injection_model_mcp} | "
+                      f"{p.tasks_direct or '-'} / {p.tasks_mcp or '-'} |" for p in other]
+            lines.append("")
         data["scripts"][script] = {"cases": len(ps), "same": same, "success": ok, "unsafe": unsafe,
-                                   "attacks_through": through, "parity": [asdict(p) for p in ps]}
+                                   "attacks_through": through, "tool_calls": calls, "access_records": recorded,
+                                   "parity": [asdict(p) for p in ps]}
     return "\n".join(lines), data

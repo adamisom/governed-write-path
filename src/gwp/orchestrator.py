@@ -16,12 +16,16 @@ This module imports no agent framework. It talks to the models only through the
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
-from pydantic import ValidationError
+from typing import get_args
+
+from botocore.exceptions import ClientError
+from pydantic import BaseModel, ValidationError
 
 from .agents import ModelCallFailed, Proposer, ProposerInput, Reader
 from .blobs import BlobStore
@@ -32,6 +36,7 @@ from .retrieval import BM25Retriever, Retriever
 from .runtime import Clock, Ids, iso_plus, sha256_hex
 from .schema import (
     FORBIDDEN_ACTIONS,
+    Action,
     SERVICE_PRINCIPAL,
     WRITE_ACTIONS,
     AuditStatus,
@@ -58,6 +63,10 @@ RUN_LEASE_SECONDS = 300
 DISPATCH_LEASE_SECONDS = 3600 + RUN_LEASE_SECONDS
 # A run parked for an outside agent's proposal waits this long. Then the sweep ends it as "needs human".
 PROPOSAL_LEASE_SECONDS = 3600
+# An outside agent's searches and proposal sizes are bounded, so it can't grow a run past DynamoDB's 400 KB item limit.
+# The built-in proposer is bounded by its model turns.
+MAX_SEARCHES_PER_RUN = 6
+MAX_PROPOSAL_BYTES = 20_000
 # Why an outside agent may hand a parked run to a person: the built-in proposer's failure reasons, and "unclear".
 CANNOT_PROPOSE_REASONS = frozenset({"model_timeout", "model_throttled", "model_error", "invalid_proposal", "unclear"})
 
@@ -108,6 +117,47 @@ class RevertResult:
 
 def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
+
+
+def _schema_field_names(model: type[BaseModel], seen: set | None = None) -> set[str]:
+    seen = set() if seen is None else seen
+    names: set[str] = set()
+    if model in seen:
+        return names
+    seen.add(model)
+    for name, f in model.model_fields.items():
+        names.add(name)
+        for arg in _type_args(f.annotation):
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                names |= _schema_field_names(arg, seen)
+    return names
+
+
+def _type_args(tp) -> list:
+    out, todo = [], [tp]
+    while todo:
+        t = todo.pop()
+        out.append(t)
+        todo.extend(get_args(t))
+    return out
+
+
+_PROPOSAL_FIELDS = _schema_field_names(ProposalSet)
+
+
+def validation_feedback(ve: ValidationError) -> str:
+    """Validation errors for a retry, in words code chose. The proposal's own text never comes back.
+
+    A path segment that isn't one of the schema's field names (an extra key the proposer made up) becomes
+    "<extra field>", and messages are pydantic's own, which don't echo the input. Feedback is rendered outside the
+    untrusted block, and over MCP another agent may read it, so it must not carry the proposer's words.
+    """
+    known = _PROPOSAL_FIELDS | {a.value for a in Action}
+    parts = []
+    for err in ve.errors()[:5]:
+        loc = ".".join(str(x) if isinstance(x, int) or x in known else "<extra field>" for x in err["loc"])
+        parts.append(f"{loc}: {err['msg']}"[:200])
+    return "; ".join(parts)[:600]
 
 
 def validate_extraction(ext: Extraction) -> list[str]:
@@ -192,7 +242,8 @@ class Orchestrator:
                 # The worker that claimed this run is gone, since a lease outlasts the Lambda timeout.
                 return self.resume(tenant_id, run_id)
             if run["state"] == "awaiting_proposal":
-                return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, run.get("retry_feedback"))
+                reason = "invalid_proposal" if run.get("retry_feedback") else None
+                return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, reason, detail=run.get("retry_feedback"))
             # Another worker holds this run. Say so instead of returning an empty outcome.
             return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
         t0 = self.clock.monotonic()
@@ -299,7 +350,7 @@ class Orchestrator:
         if proposal_set is None:
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, failure, trace, t0)
         return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
-                            trace, t0)
+                            trace, t0, claimed_state="text_extracted")
 
     def _validate_proposal(self, tenant_id: str, raw: dict, trace: dict
                            ) -> tuple[ProposalSet | None, list[str], str | None]:
@@ -310,7 +361,7 @@ class Orchestrator:
         try:
             ps = ProposalSet.model_validate(raw)
         except ValidationError as ve:
-            feedback = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in ve.errors()[:5])
+            feedback = validation_feedback(ve)
             trace["proposal_attempts"][-1]["error"] = feedback
             return None, [], feedback
         refs = validate_references(ps, tenant_id, self.store)
@@ -324,8 +375,13 @@ class Orchestrator:
 
     def _decide(self, tenant_id: str, run_id: str, doc: dict, extraction: Extraction, ctx: KeyedContext,
                 proposal_set: ProposalSet, cross_tenant: list[str], policy: dict, tenant: dict, trace: dict,
-                t0: float) -> RunResult:
-        """Steps 8 to 12 for a valid proposal set, the same whether the internal proposer or an agent made it."""
+                t0: float, claimed_state: str) -> RunResult:
+        """Steps 8 to 12 for a valid proposal set, the same whether the internal proposer or an agent made it.
+
+        `claimed_state` is the state this worker's claim left the run in. Step 9 starts by renewing the lease on
+        that condition and ends with a conditional move to `audited`, so a worker that outlived its lease, which
+        the sweep has since finished, stops before anything applies and leaves nothing half done.
+        """
         # Step 8: policy check and tier.
         if cross_tenant:
             decision = None
@@ -335,6 +391,10 @@ class Orchestrator:
             route, reason = decision.route, decision.reason
 
         # Step 9: one audit record per proposal, before anything is visible.
+        now = self.clock.now()
+        if not self.store.update_run(tenant_id, run_id, {"lease_until": iso_plus(now, RUN_LEASE_SECONDS)},
+                                     expect_state=claimed_state):
+            return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         audit_ids = []
         for i, p in enumerate(proposal_set.proposals):
             pc = decision.proposals[i] if decision else None
@@ -348,9 +408,16 @@ class Orchestrator:
             # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
             self._open_task(tenant_id, run_id, "vendor_requested_bank_change")
         # The whole set is recorded. From here on, `resume` may finish it; before this, it may not.
-        self.store.update_run(tenant_id, run_id, {"state": "audited", "audit_ids": audit_ids,
-                                                  "audit_set_complete": True, "route": route,
-                                                  "route_reason": reason}, ("audited", self.clock.now()))
+        if not self.store.update_run(tenant_id, run_id, {"state": "audited", "audit_ids": audit_ids,
+                                                         "audit_set_complete": True, "route": route,
+                                                         "route_reason": reason}, ("audited", self.clock.now()),
+                                     expect_state=claimed_state):
+            # The sweep finished this run after the lease renewal above, so it may have seen an incomplete set.
+            # Nothing has applied; close these records, and leave the run as the sweep left it.
+            for aid in audit_ids:
+                self.store.transition_audit(tenant_id, aid, [AuditStatus.proposed], AuditStatus.failed,
+                                            self.clock.now(), {"error": "claim_lost"}, terminal=True)
+            return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
 
         # Step 10: route.
         now = self.clock.now()
@@ -391,6 +458,8 @@ class Orchestrator:
                   "extraction": trace["extraction"], "extraction_flags": trace["extraction_flags"],
                   "model_calls": trace["model_calls"], "retrieved": trace["retrieved"], "searches": [],
                   "proposal_attempts": [], "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS),
+                  # The vendor code resolved in step 5, a trusted id, so a view of the run needs no document text.
+                  "vendor_id": next((r["id"] for r in trace["retrieved"] if r["kind"] == "vendor"), None),
                   # The server's own time so far. The run's latency adds the time after the proposal arrives, and
                   # leaves out the time the run waited for the agent.
                   "prepare_latency_ms": int((self.clock.monotonic() - t0) * 1000)}
@@ -416,6 +485,8 @@ class Orchestrator:
         if run["state"] != "awaiting_proposal":
             raise NotAwaitingProposal(f"run {run_id} is not waiting for a proposal (state {run['state']}, "
                                       f"outcome {run.get('outcome')})")
+        if run.get("lease_until") and run["lease_until"] < self.clock.now():
+            raise NotAwaitingProposal(f"run {run_id} passed its proposal deadline and goes to a person")
         return run
 
     def awaiting_proposals(self, tenant_id: str, principal: Principal) -> list[dict]:
@@ -452,7 +523,11 @@ class Orchestrator:
         hits = self.retriever_factory(tenant_id).search(q, k=3)
         entry = {"query": q, "hits": [{"chunk_id": h.chunk_id, "doc_id": h.doc_id, "version": h.version,
                                        "score": h.score} for h in hits]}
-        self.store.append_to_run(tenant_id, run_id, {"searches": [entry]}, expect_state="awaiting_proposal")
+        # Logged before the hits are returned, and only while the run still waits and is under its search limit.
+        if not self.store.append_to_run(tenant_id, run_id, {"searches": [entry]}, expect_state="awaiting_proposal",
+                                        max_len=("searches", MAX_SEARCHES_PER_RUN)):
+            raise NotAwaitingProposal(f"run {run_id} is no longer waiting for a proposal, or has used its "
+                                      f"{MAX_SEARCHES_PER_RUN} searches")
         return [{"chunk_id": h.chunk_id, "text": h.text} for h in hits]
 
     def submit_proposal(self, tenant_id: str, run_id: str, raw: dict, principal: Principal) -> RunResult:
@@ -493,7 +568,7 @@ class Orchestrator:
         """
         self._require_agent(principal)
         if reason not in CANNOT_PROPOSE_REASONS:
-            raise NotAllowed(f"reason must be one of {', '.join(sorted(CANNOT_PROPOSE_REASONS))}")
+            raise ValueError(f"reason must be one of {', '.join(sorted(CANNOT_PROPOSE_REASONS))}")
         run = self.store.get_run(tenant_id, run_id)
         if run is None:
             raise KeyError(run_id)
@@ -512,6 +587,10 @@ class Orchestrator:
                 t0: float) -> RunResult:
         run_id = run["run_id"]
         attempt = len(trace["proposal_attempts"]) + 1
+        size = len(json.dumps(raw, default=str))
+        if size > MAX_PROPOSAL_BYTES:
+            # Not stored, so it can't grow the run past DynamoDB's item limit. It still counts as an attempt.
+            raw = {"too_large_bytes": size}
         trace["proposal_attempts"].append({"attempt": attempt, "raw": raw, "tools": ["propose"],
                                            "by": principal.principal_id})
         doc = self.store.get_document(tenant_id, run["document_id"])
@@ -525,18 +604,27 @@ class Orchestrator:
         trace["retrieved"] = keyed["retrieved"] + [
             {"kind": "policy_chunk", "id": h["chunk_id"], "version": h["version"], "score": h["score"],
              "query": s["query"]} for s in trace["searches"] for h in s["hits"]]
-        proposal_set, cross_tenant, feedback = self._validate_proposal(tenant_id, raw, trace)
+        if "too_large_bytes" in raw:
+            proposal_set, cross_tenant = None, []
+            feedback = f"proposal too large: {raw['too_large_bytes']} bytes, the limit is {MAX_PROPOSAL_BYTES}"
+            trace["proposal_attempts"][-1]["error"] = feedback
+        else:
+            proposal_set, cross_tenant, feedback = self._validate_proposal(tenant_id, raw, trace)
         if proposal_set is None:
             if attempt < 2:
                 now = self.clock.now()
-                self.store.update_run(tenant_id, run_id, {"state": "awaiting_proposal", "retry_feedback": feedback,
-                                                          "proposal_attempts": trace["proposal_attempts"],
-                                                          "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS)},
-                                      ("awaiting_proposal", now), expect_state="proposing")
+                if not self.store.update_run(tenant_id, run_id, {"state": "awaiting_proposal",
+                                                                 "retry_feedback": feedback,
+                                                                 "proposal_attempts": trace["proposal_attempts"],
+                                                                 "lease_until": iso_plus(now, PROPOSAL_LEASE_SECONDS)},
+                                             ("awaiting_proposal", now), expect_state="proposing"):
+                    # The sweep finished the run while this proposal was checked; say what it decided.
+                    return self._current(self.store.get_run(tenant_id, run_id) or run)
                 return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, "invalid_proposal", detail=feedback)
-            return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "invalid_proposal", trace, t0)
+            return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "invalid_proposal", trace, t0,
+                                expect_state="proposing")
         return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
-                            trace, t0)
+                            trace, t0, claimed_state="proposing")
 
     # -- step 5 helpers ---------------------------------------------------------------
 
@@ -693,7 +781,8 @@ class Orchestrator:
 
     # -- step 13: finalize ----------------------------------------------------------------
 
-    def _finish(self, tenant_id, run_id, outcome, reason, trace, t0, audit_ids=None, decision=None, extra=None):
+    def _finish(self, tenant_id, run_id, outcome, reason, trace, t0, audit_ids=None, decision=None, extra=None,
+                expect_state=None):
         costs = [c["cost_usd"] for c in trace["model_calls"] if c.get("cost_usd") is not None]
         fields = {
             "state": "finalized", "outcome": outcome, "reason": reason, "ended_at": self.clock.now(),
@@ -710,7 +799,20 @@ class Orchestrator:
         if audit_ids and "applied_audit_ids" not in (extra or {}):
             fields["applied_audit_ids"] = [a["audit_id"] for a in self.store.list_audits(tenant_id, run_id)
                                            if a["status"] == "applied"]
-        self.store.update_run(tenant_id, run_id, fields, (f"finalized:{outcome}", fields["ended_at"]))
+        history = (f"finalized:{outcome}", fields["ended_at"])
+        try:
+            if not self.store.update_run(tenant_id, run_id, fields, history, expect_state=expect_state):
+                return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ValidationException":
+                raise
+            # The full record would pass DynamoDB's item size limit. Finalize with the outcome only, so the run
+            # still ends and leaves the sweep's index; the audit records keep the detail.
+            small = {k: fields[k] for k in ("state", "outcome", "reason", "ended_at", "latency_ms", "audit_ids",
+                                            "applied_audit_ids")}
+            small["error"] = "run record too large to store in full"
+            if not self.store.update_run(tenant_id, run_id, small, history, expect_state=expect_state):
+                return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         return RunResult(run_id, outcome, reason, audit_ids or [])
 
     def resume(self, tenant_id: str, run_id: str) -> RunResult:
@@ -892,9 +994,13 @@ class Orchestrator:
         now = now_iso or self.clock.now()
         out = []
         for run in self.store.list_expired_leases(now):
-            res = self.resume(run["tenant_id"], run["run_id"])
-            out.append({"tenant_id": run["tenant_id"], "run_id": run["run_id"], "state": run["state"],
-                        "lease_until": run["lease_until"], "outcome": res.outcome})
+            row = {"tenant_id": run["tenant_id"], "run_id": run["run_id"], "state": run["state"],
+                   "lease_until": run["lease_until"]}
+            try:
+                row["outcome"] = self.resume(run["tenant_id"], run["run_id"]).outcome
+            except Exception as exc:  # noqa: BLE001 - one run that can't be resumed must not stop the others
+                row["outcome"], row["error"] = None, repr(exc)[:300]
+            out.append(row)
         return out
 
     def stale(self, now_iso: str | None = None, minutes: int = 15) -> list[dict]:

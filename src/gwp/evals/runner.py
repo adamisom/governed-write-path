@@ -63,6 +63,7 @@ class CaseRun:
     human_tasks: list[dict] = field(default_factory=list)
     elapsed_ms: int = 0
     harness_error: str | None = None
+    notes: dict = field(default_factory=dict)  # what a harness reports about itself, e.g. its MCP calls
 
 
 def snapshot(store: DynamoStore) -> dict:
@@ -135,6 +136,9 @@ class _Harness:
         self.current_doc = "main"
         self.process_index = 0
         self.run_ids: list[str] = []
+
+    def notes(self) -> dict:
+        return {}
 
     def proposer_prompts(self) -> list[str]:
         """Every prompt the proposer has been shown so far, oldest first."""
@@ -244,6 +248,7 @@ def run_case(case: Case, script: str = "cooperative", mode: str = "offline", liv
             result.base = result.base or snapshot(h.store)
         result.final = snapshot(h.store)
         result.proposer_prompts = h.proposer_prompts()[prompts_before:]
+        result.notes = h.notes()
         result.setup_runs = [h.store.get_run(t, rid) or {} for rid in setup_run_ids]
         result.runs = [h.store.get_run(t, rid) or {} for rid in h.run_ids]
         seeded = {k for k in result.base if k.startswith("AUDIT|")}

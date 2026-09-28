@@ -955,8 +955,9 @@ def test_a_failed_task_write_leaves_an_interrupted_run_leased_for_the_next_sweep
     real = store.client
     store.client = _WrappedClient(store, before=fail_task_write)
     try:
-        with pytest.raises(Exception, match="slow down"):
-            orch.recover_stranded()
+        # The sweep reports the error for this run and goes on to any others, instead of stopping.
+        (row,) = orch.recover_stranded()
+        assert row["outcome"] is None and "slow down" in row["error"]
     finally:
         store.client = real
     run = store.get_run("T1", up.run_id)

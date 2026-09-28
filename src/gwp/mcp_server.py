@@ -14,7 +14,11 @@ Tools, and the one role that may call each write verb (see `gwp.access.TOOL_ROLE
 
 The caller comes from its credential: a bearer token on streamable HTTP, checked against the same hashed key table
 as the HTTP API, or one key per process on stdio. Every call is recorded before it runs (`gwp.access`), and a
-denied call raises a tool error after its record is written.
+denied call raises a tool error after its record is written. A call the SDK refuses before any tool code runs (an
+unknown tool, or arguments that fail the input schema) is recorded by a middleware.
+
+An agent sees no free text from any document except the typed fields of the run it is proposing for, the same as
+the built-in proposer: its views of other runs and audit records keep ids, states, amounts and codes only.
 
 Tracing: the MCP SDK opens a server span for every tool call and continues the caller's trace from the request's
 `_meta`. This module adds the caller's role and tenant, the access decision, and the ids and outcome of the call to
@@ -23,6 +27,8 @@ that span. Spans never carry document text, proposal text or notes.
 
 from __future__ import annotations
 
+import contextvars
+import re
 from typing import Any, Callable
 
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -31,11 +37,14 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from opentelemetry import trace
 
-from .access import AccessDenied, AccessLog, Caller, caller_from_key
+from .access import TOOL_ROLES, AccessDenied, AccessLog, Caller, caller_from_key
 from .orchestrator import InvalidDecision, NotAllowed, NotAwaitingProposal, Orchestrator
 from .schema import ProposalSet, Role
 
 CallerResolver = Callable[[], Caller]
+
+# Set for each tools/call by the middleware; `guard` marks it once the call's access record is written.
+_CALL: contextvars.ContextVar[dict | None] = contextvars.ContextVar("gwp_mcp_call", default=None)
 
 INSTRUCTIONS = """This server is a governed write path for a small accounts payable ledger. Your role comes from
 your credential.
@@ -96,24 +105,49 @@ def _span(**attrs: Any) -> None:
             span.set_attribute(f"gwp.{k}", v if isinstance(v, (str, int, float, bool)) else str(v))
 
 
-def _run_summary(run: dict) -> dict[str, Any]:
-    ext = run.get("extraction") or {}
-    return {"run_id": run["run_id"], "document_id": run["document_id"], "state": run.get("state"),
-            "outcome": run.get("outcome"), "reason": run.get("reason"), "started_at": run.get("started_at"),
-            "ended_at": run.get("ended_at"), "audit_ids": run.get("audit_ids", []),
-            "applied_audit_ids": run.get("applied_audit_ids", []),
-            # From the reader's typed fields. The strings are the supplier's text, so they are labeled untrusted.
-            "document_vendor_name_untrusted": ext.get("vendor_name"),
-            "document_invoice_number_untrusted": ext.get("invoice_number"),
-            "document_total_cents": ext.get("total_cents")}
+_ID = re.compile(r"^[A-Za-z0-9#._/-]{1,40}$")
 
 
-def _audit_summary(a: dict) -> dict[str, Any]:
-    return {"audit_id": a["audit_id"], "run_id": a["run_id"], "action": a["action"], "params": a["params"],
-            "tier": a["tier"], "tier_rules": a.get("tier_rules", []), "status": a["status"],
-            "write_ids": a.get("write_ids", []), "decided_by": a.get("decided_by"),
-            "decision": a.get("decision"), "decline_note": a.get("decline_note"),
-            "history": a.get("history", [])}
+def _agent_safe(value: Any) -> Any:
+    """Numbers, booleans, and strings with no spaces of at most 40 characters (ids, dates, codes). Anything else,
+    which could carry a sentence from a document or a model, is left out."""
+    if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
+        return value
+    if isinstance(value, str):
+        return value if _ID.match(value) else "<text withheld>"
+    if isinstance(value, list):
+        return [_agent_safe(v) for v in value[:20]]
+    if isinstance(value, dict):
+        return {k: _agent_safe(v) for k, v in list(value.items())[:30] if isinstance(k, str) and _ID.match(k)}
+    return "<text withheld>"
+
+
+def _run_summary(run: dict, for_agent: bool) -> dict[str, Any]:
+    out = {"run_id": run["run_id"], "document_id": run["document_id"], "state": run.get("state"),
+           "outcome": run.get("outcome"), "reason": run.get("reason"), "started_at": run.get("started_at"),
+           "ended_at": run.get("ended_at"), "audit_ids": run.get("audit_ids", []),
+           "applied_audit_ids": run.get("applied_audit_ids", []), "vendor_id": run.get("vendor_id"),
+           "document_total_cents": (run.get("extraction") or {}).get("total_cents")}
+    if not for_agent:
+        # People see the document's own strings, labeled. An agent never sees free text from any document except
+        # the typed fields of the run it is proposing for, as the built-in proposer never does.
+        ext = run.get("extraction") or {}
+        out["document_vendor_name_untrusted"] = ext.get("vendor_name")
+        out["document_invoice_number_untrusted"] = ext.get("invoice_number")
+    return out
+
+
+def _audit_summary(a: dict, for_agent: bool) -> dict[str, Any]:
+    out = {"audit_id": a["audit_id"], "run_id": a["run_id"], "action": a["action"], "tier": a["tier"],
+           "tier_rules": a.get("tier_rules", []), "status": a["status"], "write_ids": a.get("write_ids", []),
+           "decided_by": a.get("decided_by"), "decision": a.get("decision"),
+           "history": [{"state": h.get("state"), "at": h.get("at")} for h in a.get("history", [])]}
+    if for_agent:
+        out["params"] = _agent_safe(a["params"])
+    else:
+        out["params"] = a["params"]
+        out["decline_note"] = a.get("decline_note")
+    return out
 
 
 PROPOSE_DESCRIPTION = """Propose one to three writes for a run waiting for a proposal. You never write anything
@@ -136,15 +170,46 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
     if not orch.external_proposals:
         raise ValueError("the MCP server needs an orchestrator with external_proposals=True")
     access = AccessLog(orch.store, orch.clock, orch.ids)
+
+    async def record_rejected_calls(ctx: Any, call_next: Callable) -> Any:
+        """Record a tools/call the SDK refuses before any tool code runs: an unknown tool, or arguments that fail
+        the tool's input schema. Every other call is recorded by `guard`."""
+        if getattr(ctx, "method", None) != "tools/call" or getattr(ctx, "request_id", None) is None:
+            return await call_next(ctx)
+        holder: dict = {"recorded": False}
+        token = _CALL.set(holder)
+        try:
+            return await call_next(ctx)
+        finally:
+            _CALL.reset(token)
+            if not holder["recorded"]:
+                params = ctx.params if isinstance(ctx.params, dict) else {}
+                name = str(params.get("name"))[:64]
+                reason = ("arguments failed the tool's input schema" if name in TOOL_ROLES
+                          else f"no tool named {name!r}")
+                try:
+                    access.record(resolve_caller(), name, "denied", reason)
+                except Exception:  # noqa: BLE001 - an unauthenticated caller, or the store failed: nothing ran
+                    pass
+
     # MCPServer calls logging.basicConfig on the root logger at this level when it's created, so the default is
     # WARNING rather than the SDK's INFO, which logs every AWS credential lookup.
     server = MCPServer(name, instructions=INSTRUCTIONS, token_verifier=token_verifier, auth=auth,
-                       log_level=log_level)  # type: ignore[arg-type]
+                       log_level=log_level, middleware=[record_rejected_calls])  # type: ignore[arg-type]
 
     def guard(tool: str, **targets: str) -> Caller:
         caller = resolve_caller()
+        bad = {k: v for k, v in targets.items() if v is not None and not _ID.match(v)}
         _span(tenant_id=caller.tenant_id, role=caller.principal.role.value, principal_id=caller.principal.principal_id,
-              **targets)
+              **{k: v for k, v in targets.items() if k not in bad})
+        holder = _CALL.get()
+        if holder is not None:
+            holder["recorded"] = True
+        if bad:
+            shown = {k: (str(v)[:40] + "...") for k, v in bad.items()}
+            access_id = access.record(caller, tool, "denied", "malformed id", shown)
+            _span(access="denied", access_id=access_id)
+            raise ToolError(f"malformed id in {', '.join(sorted(bad))} (recorded as {access_id})")
         try:
             access_id = access.check(caller, tool, {k: v for k, v in targets.items() if v})
         except AccessDenied as e:
@@ -165,7 +230,7 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
             raise ToolError(f"access denied: {e} (recorded as {access_id})") from None
         except KeyError:
             raise ToolError("not found in your tenant") from None
-        except (NotAwaitingProposal, InvalidDecision) as e:
+        except (NotAwaitingProposal, InvalidDecision, ValueError) as e:
             raise ToolError(str(e)) from None
 
     # -- the agent ------------------------------------------------------------------------------------
@@ -260,7 +325,7 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
         if run is None:
             raise ToolError("not found in your tenant")
         _span(outcome=run.get("outcome"))
-        return _run_summary(run)
+        return _run_summary(run, c.principal.role == Role.agent)
 
     @server.tool(description="The runs in your tenant, newest first, optionally only those in one state, e.g. "
                              "awaiting_proposal or finalized.")
@@ -270,7 +335,7 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
         runs.sort(key=lambda r: r.get("started_at", ""), reverse=True)
         runs = runs[:max(1, min(limit, 100))]
         _span(count=len(runs))
-        return {"runs": [_run_summary(r) for r in runs]}
+        return {"runs": [_run_summary(r, c.principal.role == Role.agent) for r in runs]}
 
     @server.tool(description="One proposed write's audit record: action, parameters, tier, status and history.")
     def get_audit(audit_id: str) -> dict[str, Any]:
@@ -279,6 +344,6 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
         if a is None:
             raise ToolError("not found in your tenant")
         _span(outcome=a["status"])
-        return _audit_summary(a)
+        return _audit_summary(a, c.principal.role == Role.agent)
 
     return server

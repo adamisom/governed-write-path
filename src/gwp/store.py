@@ -385,13 +385,20 @@ class DynamoStore:
             raise
         return True
 
-    def append_to_run(self, tenant_id: str, run_id: str, lists: dict[str, list], expect_state: str) -> bool:
-        """Append to list fields on a run, only while it is in `expect_state`. Returns False if it had moved on.
+    def append_to_run(self, tenant_id: str, run_id: str, lists: dict[str, list], expect_state: str,
+                      max_len: tuple[str, int] | None = None) -> bool:
+        """Append to list fields on a run, only while it is in `expect_state`, and, with `max_len` (field, n), only
+        while that list is shorter than n. Returns False if a condition failed.
 
-        An append, not a read and a write, so two calls at once both land.
+        An append, not a read and a write, so two calls at once both land, and neither passes the limit.
         """
         names: dict[str, str] = {"#state": "state"}
         values: dict[str, Any] = {":expect_state": expect_state, ":empty": []}
+        condition = "attribute_exists(pk) AND #state = :expect_state"
+        if max_len is not None:
+            names["#cap"] = max_len[0]
+            values[":cap"] = max_len[1]
+            condition += " AND (attribute_not_exists(#cap) OR size(#cap) < :cap)"
         sets = []
         for i, (k, v) in enumerate(lists.items()):
             names[f"#l{i}"] = k
@@ -402,7 +409,7 @@ class DynamoStore:
                 TableName=self.tables[RECORDS],
                 Key=serialize_item({"pk": tenant_pk(tenant_id), "sk": f"RUN#{run_id}"}),
                 UpdateExpression="SET " + ", ".join(sets),
-                ConditionExpression="attribute_exists(pk) AND #state = :expect_state",
+                ConditionExpression=condition,
                 ExpressionAttributeNames=names, ExpressionAttributeValues=serialize_values(values))
         except ClientError as e:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
