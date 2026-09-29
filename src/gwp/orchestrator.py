@@ -906,7 +906,9 @@ class Orchestrator:
             # run and its task are written in one transaction: finalizing drops the lease, so a crash between two
             # separate writes left a finalized run with no task and nothing that would ever open it.
             # A run parked for an outside agent that never proposed ends the same way, under its own reason.
-            reason = "proposal_timeout" if run["state"] == "awaiting_proposal" else "interrupted"
+            # A worker that reserved the run for its task and died (entry 61) left the reason it was opening.
+            reason = run.get("pending_task_reason") or (
+                "proposal_timeout" if run["state"] == "awaiting_proposal" else "interrupted")
             if not self.store.finalize_run_with_task(
                     tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
                                         "reason": reason}, ("finalized_on_resume", now),
@@ -921,11 +923,18 @@ class Orchestrator:
             # this reads again and finishes the set by tier (entry 60). The worker's own move to `audited` is
             # conditional on its claim, so once this lands, the worker closes what it wrote as `claim_lost`. A
             # crash before the records below are closed leaves them to the staleness pass (M13).
-            if not self._update_run_with_task(
+            try:
+                done = self._update_run_with_task(
                     tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
                                         "reason": "interrupted", "audit_ids": audit_ids},
-                    ("finalized_on_resume", now), "interrupted", run["state"], set_incomplete=True,
-                    lease_before=lease_expired_by):
+                    ("finalized_on_resume", now), "interrupted", run["state"], fallback=False, set_incomplete=True,
+                    lease_before=lease_expired_by)
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "TransactionCanceledException":
+                    raise
+                # Still contended after the retries. Change nothing; the next sweep comes back (entry 61).
+                return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
+            if not done:
                 if _again:
                     return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
                 return self.resume(tenant_id, run_id, lease_expired_by, _again=True)
@@ -970,20 +979,32 @@ class Orchestrator:
         return RunResult(run_id, outcome, run.get("reason"), audit_ids)
 
     def _update_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
-                              reason: str, expect_state: str | None, **conditions) -> bool:
-        """Update the run and open its task in one transaction (M14, entries 44 and 56). If contention or throttling
-        cancels the transaction, fall back to the task first and then the run, which keeps its lease until the task
-        exists, so the sweep can finish it (entry 58). A crash between those two can still give a second task, but
-        it can't lose the task, and the fallback runs only after a cancellation."""
+                              reason: str, expect_state: str | None, fallback: bool = True, **conditions) -> bool:
+        """Update the run and open its task in one transaction (M14, entries 44 and 56).
+
+        Contention or throttling cancels a transaction without a failed condition, and it usually clears at once,
+        so the transaction is tried up to three times (entry 61). If it is still cancelled and `fallback` is set,
+        which only a worker holding the run's claim sets, the worker first reserves the run: a conditional update
+        that records the task's reason as `pending_task_reason` and renews the lease, so the sweep leaves the run
+        alone. Then it opens the task, and then it updates the run. A crash after the reservation leaves the sweep
+        to finish the run under that same reason, so one task. Without `fallback`, the error is raised.
+        """
         task = self._task(tenant_id, run_id, reason)
-        try:
-            return self.store.update_run_with_task(tenant_id, run_id, fields, history, task, expect_state,
-                                                   **conditions)
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "TransactionCanceledException" or too_large(e):
-                raise
-            self._open_task(tenant_id, run_id, reason)
-            return self.store.update_run(tenant_id, run_id, fields, history, expect_state, **conditions)
+        for attempt in range(3):
+            try:
+                return self.store.update_run_with_task(tenant_id, run_id, fields, history, task, expect_state,
+                                                       **conditions)
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "TransactionCanceledException" or too_large(e):
+                    raise
+                if attempt == 2 and not fallback:
+                    raise
+        reserve = {"pending_task_reason": reason, "lease_until": iso_plus(self.clock.now(), RUN_LEASE_SECONDS)}
+        if not self.store.update_run(tenant_id, run_id, reserve, expect_state=expect_state, **conditions):
+            return False  # someone else moved the run on first; this worker opens nothing
+        self._open_task(tenant_id, run_id, reason)
+        return self.store.update_run(tenant_id, run_id, {**fields, "pending_task_reason": None}, history,
+                                     expect_state, **conditions)
 
     def _task(self, tenant_id: str, run_id: str, reason: str) -> dict:
         return {"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id, "reason_code": reason,

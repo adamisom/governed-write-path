@@ -505,7 +505,7 @@ Source: third Fable audit, 9/29/26 (GWP3-2).
 
 - **Before.** M14 and entry 56 write the run and its task in one transaction. `update_run_with_task` handled a failed condition on either item and raised on anything else. A `TransactionConflict`, for example from an agent's search on the same run, reached the fail-closed handler. The handler finalized the run as `internal_error` with no task, no lease and no records, so nothing revisited it. The size fallback in `_finish` caught only moto's top-level `ValidationException`, and DynamoDB reports an oversized update in a transaction as a `ValidationError` cancellation reason.
 - **Choice.** `_update_run_with_task` in the orchestrator catches a cancellation that is not a failed condition and falls back to the order used before M14: the task first, then the run. The run keeps its lease until the task exists. `too_large` recognizes both shapes of the size error, and `_finish` uses it. Tests cancel the transaction once on each path, and inject the size error in both shapes.
-- **Left as is.** A crash inside the fallback, between its two writes, can still give a person a second task. It needs a cancellation and then a crash, and it can't lose a task.
+- **Changed by entry 61.** The fallback left a gap between its two writes, which a round 2 Codex review reached without a crash.
 
 ## 59. The sweep finalizes a run only if its lease ran out
 
@@ -520,6 +520,14 @@ Source: third Fable audit, 9/29/26 (GWP3-4).
 
 - **Before.** `resume` read the run once. If the set was not marked complete, it closed the records as failed and then finalized the run with an unconditional update. A worker that outlived its lease could mark the set complete in between and apply part of it, while `resume` closed the rest. The set ended half applied, and the closed record was terminal. Only the long-lived MCP server can have such a worker, since the Lambda's timeout is shorter than the lease.
 - **Choice.** `resume` finalizes the run and opens its `interrupted` task first, in one transaction, on the condition that the set is still not complete and the run is in the state it read. Only then does it close the records. If the condition fails, it reads again once and finishes the set by tier. A worker whose move to `audited` comes second loses its claim and closes what it wrote as `claim_lost`. A crash before the records are closed leaves them to the staleness pass (M13).
+
+## 61. A run-and-task transaction is retried, and the fallback reserves the run before it opens the task
+
+Source: the round 2 Codex review of the whole repository at `8180275`, 9/29, reproduced by a Fable sub-agent the same day.
+
+- **Before.** Entry 58's fallback opened the task and then updated the run. The sweep could finalize the run in between, as `interrupted` with its own task. The fallback's update then failed its condition, and the person had two tasks under two reasons. It needs a worker already past the lease it renewed, a cancelled transaction, and the sweep landing between two writes. The same held for the bank change task. botocore doesn't retry a cancelled transaction, so one conflict was enough to reach the fallback.
+- **Choice.** The run-and-task transaction is tried up to three times, which is safe because both of its items are conditional. If it is still cancelled, a worker holding the claim first reserves the run with a conditional update. The update records the task's reason as `pending_task_reason` and renews the lease, so the sweep leaves the run alone (entry 59). Then the worker opens the task and updates the run, clearing the field. A crash after the reservation leaves the sweep to finalize the run under the recorded reason, so the person gets one task. `resume` has no fallback: if its transaction stays cancelled, it changes nothing and the next sweep comes back. Five tests cover the retry, the race, the crash after the reservation, the bank path and `resume`. Four fail on the old code; the fifth checks that the bank path still posts with one task.
+- **Still open.** On the bank path, a crash after the task is opened and before the move to `audited` still gives `resume`'s `interrupted` task beside the bank task. It needs a cancellation that survives three tries and then a crash, and nothing posts.
 
 # The MCP server
 
