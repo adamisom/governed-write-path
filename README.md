@@ -90,7 +90,7 @@ uv run gwp eval --mode offline --out eval-out   # writes eval-out/eval-offline-c
 uv run gwp generate-docs                        # re-render the case PDFs and check each one against its spec
 ```
 
-A live run spends money, so it needs two flags and a cap. A full pass is 91 live cases and 300 model runs at three repeats, about $11 by the research note's estimate of $0.036 a run before retries, and the command prints that estimate. A cap of $15 leaves room for retries:
+A live run spends money, so it needs two flags and a cap. A full pass is 92 live cases and 303 model runs at three repeats, about $11 by the research note's estimate of $0.036 a run before retries, and the command prints that estimate. A cap of $15 leaves room for retries:
 
 ```sh
 ANTHROPIC_API_KEY=... uv run gwp eval --mode live --provider anthropic --confirm-spend --max-usd 15
