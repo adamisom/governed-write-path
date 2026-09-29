@@ -567,4 +567,29 @@ Source: an independent audit on the Fable model of main at `8356cdb`, focused on
 - **A search that landed just before the claim was dropped (low-medium).** `submit_proposal` built its trace from the run as it was before the claim; it now reads the run again after the claim.
 - **The sweep's handler hid a run it could never resume (low-medium).** The scheduled handler now counts such runs apart, prints the count, and fails the invocation so the error metric shows it.
 - **Smaller items (low).** The fail-closed handler no longer rewrites a run the sweep already finished and only adds the late worker's error; the size fallback keeps the extraction and the original error; the sweep re-reads each run and skips one whose lease was renewed after the index listed it; ids are checked with a full match, so a trailing newline doesn't pass; the work list leaves out runs past their deadline; a failed park returns the run's state; and the middleware records a malformed tool name as such.
-- **Left open (low).** A worker that dies while closing the records of a lost claim leaves a record at `proposed` on a finalized run. The staleness check lists it, but nothing closes it. The built-in path has the same kind of gap between writing records and moving the run to `audited`, and the staleness handler work on main is the place to close both. Entry 47 closes the built-in path's gap.
+- **Left open (low).** A worker that dies while closing the records of a lost claim leaves a record at `proposed` on a finalized run. The staleness check lists it, but nothing closes it. The built-in path has the same kind of gap between writing records and moving the run to `audited`, and the staleness handler work on main is the place to close both. Entry 47 closes the built-in path's gap, and M13 shows it closes this one too.
+
+## M11. Access records expire after 400 days, and the gateway limits how often a key may call
+
+Source: a Codex review of the MCP server at `09fcc6e`, 9/28, checked again on main by a Fable sub-agent on 9/29.
+
+- **Before.** `AccessLog.record` writes a new item for every call, allowed or denied, including calls the SDK refuses, and nothing ever removed one. A caller with a valid key could grow the records table without bound. The review also said capacity could run out and stop every call, but both tables are on-demand, so the cost is storage and writes, not an outage.
+- **Choice.** Each access record carries `expires_at`, in epoch seconds, 400 days after it was written, and the records table has DynamoDB TTL on that attribute. Only access records carry it. TTL deletes the item on DynamoDB's side, so the Lambda role still needs no `DeleteItem`. A test checks the attribute on allowed, denied and SDK-refused calls, and another reads the TTL block from the Terraform. moto doesn't expire items, so no test watches one disappear.
+- **Alternative.** The review suggested a per-key quota in code. A limit on how often a key may call belongs to whatever fronts the server, as API Gateway already throttles the HTTP API (entry 25). Over stdio there is one caller per process, so a quota means nothing there. The MCP server has no deployment yet, and the gateway that will front it is where to set the limit.
+- **Why 400 days.** It keeps a full year of calls to review, and the number is one constant in `access.py`.
+
+## M12. The README names L02 among the cases where only the MCP path opens a task
+
+Source: the same Codex review, checked again on main on 9/29.
+
+- **Before.** The README said only L04 and L06 open a task for a person on the MCP path and none on the built-in path. Since M10, a second invalid proposal on the MCP path opens a task before the run ends, so L02 does too, and the replay report lists all three.
+- **Choice.** The README now names L02, L04 and L06 and says why each differs. The behavior is intended, so no code changed. The built-in path still opens no task when its proposer fails twice; whether it should is in the MCP design doc's follow-ups.
+
+## M13. The record left by a worker that died closing a lost claim is closed by the staleness pass
+
+Source: the item M10 left open, checked on 9/29 after entry 47 merged.
+
+- **Before.** A worker that loses its claim closes the records it just wrote as failed with `claim_lost`. If it died in that loop, a record stayed at `proposed` on a finalized run, and nothing closed it.
+- **Evidence.** A test builds the case on the MCP path: the sweep finishes the run while the worker writes its record, the worker loses the move to `audited`, and it dies while closing. After 15 minutes `resume_stale` (entry 47) resumes the run, and `resume` closes the record as failed with `audit_set_incomplete`, because the set was never fully recorded. The run keeps the sweep's outcome and reason, NEEDS_HUMAN and `interrupted`, and it has one task, since a task is keyed by run and reason.
+- **Choice.** No code change. Entry 47 already covers it, and the test pins that.
+

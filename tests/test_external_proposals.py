@@ -425,3 +425,40 @@ def test_after_the_deadline_the_context_and_search_are_closed(store):
         orch.proposal_context("T1", res.run_id, AGENT)
     with pytest.raises(NotAwaitingProposal, match="deadline"):
         orch.search_policy("T1", res.run_id, "freight", AGENT)
+
+
+def test_the_staleness_pass_closes_a_record_left_by_a_worker_that_died_closing_a_lost_claim(store):
+    """M10's open item. The sweep finished the run while the worker was writing its records, the worker lost the
+    move to `audited`, and it died while closing its records as `claim_lost`, so one stayed at `proposed` with an
+    open flag on a finalized run. The staleness pass closes it and leaves the sweep's outcome and single task."""
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    class Die(BaseException):
+        pass
+
+    orch, res, clock = parked(store)
+    real_put, real_transition = store.put_audit, store.transition_audit
+
+    def sweep_before_put(audit):
+        clock.advance(RUN_LEASE_SECONDS + 30)
+        assert [r["run_id"] for r in orch.recover_stranded()] == [res.run_id]
+        store.transition_audit = lambda *a, **k: (_ for _ in ()).throw(Die())  # dies while closing
+        real_put(audit)
+
+    store.put_audit = sweep_before_put
+    with pytest.raises(Die):
+        orch.submit_proposal("T1", res.run_id, {"proposals": [c01_post()]}, AGENT)
+    store.put_audit, store.transition_audit = real_put, real_transition
+    before = store.get_run("T1", res.run_id)
+    assert (before["state"], before["outcome"], before["reason"]) == ("finalized", "NEEDS_HUMAN", "interrupted")
+    assert [a["status"] for a in store.list_audits("T1", res.run_id)] == ["proposed"]
+    clock.advance(16 * 60)
+    assert [s["status"] for s in orch.stale()] == ["proposed"]
+    assert [(r["run_id"], r["outcome"]) for r in orch.resume_stale()] == [(res.run_id, "NEEDS_HUMAN")]
+    (audit,) = store.list_audits("T1", res.run_id)
+    assert (audit["status"], audit["error"]) == ("failed", "audit_set_incomplete")
+    assert orch.stale() == []
+    after = store.get_run("T1", res.run_id)
+    assert (after["outcome"], after["reason"]) == ("NEEDS_HUMAN", "interrupted")
+    assert [t["reason_code"] for t in store.list_human_tasks("T1") if t["run_id"] == res.run_id] == ["interrupted"]
+    assert not any(p["invoice_number"] == "INV-6001" for p in store.list_payables("T1", "V-101"))

@@ -179,3 +179,9 @@ def test_the_records_table_has_the_leased_runs_index_the_store_queries():
     records = (TF / "storage.tf").read_text().split('resource "aws_dynamodb_table" "audit"')[0]
     assert f'name            = "{LEASE_INDEX}"' in records
     assert 'hash_key        = "lease_flag"' in records and 'range_key       = "lease_until"' in records
+
+
+def test_the_records_table_expires_access_records_by_the_attribute_the_code_writes():
+    records = (TF / "storage.tf").read_text().split('resource "aws_dynamodb_table" "audit"')[0]
+    ttl = re.search(r"ttl \{(.*?)\}", records, re.S).group(1)
+    assert 'attribute_name = "expires_at"' in ttl and "enabled        = true" in ttl

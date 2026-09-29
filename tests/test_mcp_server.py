@@ -96,6 +96,7 @@ def test_role_matrix_every_call_is_recorded_and_a_denied_call_changes_nothing_el
     (rec,) = records
     assert (rec["tool"], rec["role"], rec["principal_id"], rec["layer"]) == (tool, role.value, f"{role.value}:t",
                                                                              "mcp_server")
+    assert rec["expires_at"] == access.expires_at(rec["at"])  # DynamoDB's TTL deletes it after the retention
     if role in TOOL_ROLES[tool]:
         assert not res.is_error, res.content[0].text
         assert rec["decision"] == "allowed"
@@ -272,6 +273,7 @@ def test_a_call_the_sdk_refuses_before_our_code_runs_is_still_recorded(demo):
     records = store.list_access_records("T1")[before:]
     assert [(r["tool"], r["decision"]) for r in records] == [("send_email", "denied"), ("propose", "denied")]
     assert "no tool named" in records[0]["reason"] and "input schema" in records[1]["reason"]
+    assert all(r["expires_at"] == access.expires_at(r["at"]) for r in records)
     assert store.get_run("T1", demo.runs["C01"])["state"] == "awaiting_proposal"
 
 
@@ -295,3 +297,8 @@ def test_an_agent_sees_no_parameters_of_a_forbidden_proposal(demo):
 def test_an_id_with_a_trailing_newline_is_malformed(demo):
     res = call_as(demo, caller(Role.agent), "get_run", {"run_id": demo.runs["C01"] + "\n"})
     assert res.is_error and "malformed id" in res.content[0].text
+
+
+def test_an_access_record_expires_after_the_retention_period():
+    assert access.expires_at("2026-09-01T12:00:00.000000Z") == 1788264000 + access.ACCESS_RECORD_RETENTION_DAYS * 86400
+    assert access.ACCESS_RECORD_RETENTION_DAYS >= 366

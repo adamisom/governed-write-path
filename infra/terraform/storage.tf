@@ -33,6 +33,13 @@ resource "aws_dynamodb_table" "records" {
     projection_type = "ALL"
   }
 
+  # Only access records carry expires_at (epoch seconds, gwp/access.py); DynamoDB deletes each one after it.
+  # Deletion by TTL needs no DeleteItem grant for the Lambda role.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
   point_in_time_recovery {
     enabled = true
   }

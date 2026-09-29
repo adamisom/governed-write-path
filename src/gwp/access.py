@@ -11,7 +11,9 @@ This is stricter than the orchestrator's own checks, where an admin may also app
 revert. Those checks stay underneath as a second layer.
 
 Every call gets an access record before it runs, whether it is allowed or denied. A call whose record can't be
-written doesn't run, so there is no unrecorded call and no unrecorded denial.
+written doesn't run, so there is no unrecorded call and no unrecorded denial. Each record carries `expires_at`, and
+the records table's TTL deletes it after `ACCESS_RECORD_RETENTION_DAYS`, so a caller can't grow the table without
+bound (DECISIONS M11). How many calls a caller may make is the gateway's limit, not this module's.
 
 This module imports no MCP or agent framework. `gwp.mcp_server` uses it.
 """
@@ -20,12 +22,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .runtime import Clock, Ids, sha256_hex
 from .schema import Principal, Role
 from .store import DynamoStore
 
 READ_ANY = frozenset({Role.agent, Role.approver, Role.admin})
+
+# Longer than a year, so a year of calls can always be reviewed. DynamoDB's TTL deletes a record after this.
+ACCESS_RECORD_RETENTION_DAYS = 400
 
 # Tool name -> the roles that may call it.
 TOOL_ROLES: dict[str, frozenset[Role]] = {
@@ -64,6 +70,12 @@ def caller_from_key(api_key: str, keys_json: str) -> Caller | None:
     return Caller(Principal(principal_id=entry["principal_id"], role=Role(entry["role"])), entry["tenant_id"])
 
 
+def expires_at(at: str) -> int:
+    """The epoch second at which an access record written at `at` (ISO, from `Clock.now()`) may be deleted."""
+    written = datetime.strptime(at[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    return int(written.timestamp()) + ACCESS_RECORD_RETENTION_DAYS * 86400
+
+
 class AccessLog:
     def __init__(self, store: DynamoStore, clock: Clock, ids: Ids):
         self.store = store
@@ -73,7 +85,8 @@ class AccessLog:
     def record(self, caller: Caller, tool: str, decision: str, reason: str | None = None,
                targets: dict[str, str] | None = None, layer: str = "mcp_server") -> str:
         access_id = self.ids.new("X")
-        rec = {"access_id": access_id, "tenant_id": caller.tenant_id, "at": self.clock.now(),
+        at = self.clock.now()
+        rec = {"access_id": access_id, "tenant_id": caller.tenant_id, "at": at, "expires_at": expires_at(at),
                "principal_id": caller.principal.principal_id, "role": caller.principal.role.value, "tool": tool,
                "decision": decision, "layer": layer, "targets": targets or {}}
         if reason:
