@@ -391,9 +391,88 @@ Source: brief, 9/28.
 - **Found, not fixed.** Writing the cases showed that an approval applies the write against the records at approval time, while the checks shown to the approver ran at proposal time. A probe reproduced it: PO-7002 has 50 cases received, an invoice for 50 at a price 6% over waits for approval, an invoice for 40 at the right price posts, and approving the first leaves 90 invoiced against 50 received. It is not a case, because the right outcome depends on a choice the policy doesn't state, whether approval runs the checks again or the approver accepts the state as shown. It is Adam's call.
 - **Cost.** The whole suite is 349 tests in about 100 seconds, up from 238 in about 51. The offline eval report takes about 62 seconds. A live pass is now 91 live cases and 300 model runs at three repeats, about $10.80 by the research estimate.
 
-# The MCP server (branch `mcp-server`)
+# Changes after the second audit
 
-These entries are numbered M1 onward so they don't collide with entries added on main while the branch is open.
+A second independent audit on 9/28/26 (`governed-write-path-notes/fable-audit-2.md`) found 1 high, 5 medium and 4 low findings. The entries below record what changed because of it. `governed-write-path-notes/audit-2-fixes.md` maps each finding to its commit and test.
+
+## 47. The staleness sweep resumes finalized runs, and a retried approval applies what was approved
+
+Source: second Fable audit, 9/28/26 (GWP2-1), and finding F6 of the MCP branch's audit.
+
+- **Before.** Entry 33 said `resume` finishes a set on a finalized run or not, and entry 45 said the approver's own retry closes the gap for a run waiting for approval. Both were true of the function and false of the service. The service called `resume` only for a run whose lease ran out, and a finalized run has no lease, so these states were never repaired:
+  - An approved write whose worker died after the record moved to `approved` and before the apply. The approver's retry answered `already_decided`, and the run said PENDING_APPROVAL for good.
+  - An auto write left at `proposed` after an ordinary exception on an earlier apply of the set. The fail-closed handler finalized the run as NEEDS_HUMAN, and no task was opened.
+  - A record left at `proposed` on a finalized run whose set was never fully recorded (the MCP audit's F6). A worker that outlived its lease lost the move to `audited` and died while closing its records.
+- **Evidence.** The audit's reproductions A1 and A2 show the first two. After each, `recover_stranded` returned nothing, a redelivered event returned the stored outcome, and only a manual `resume` applied the write. A test builds the third by letting the sweep finalize a run between the worker's two audit puts.
+- **Choice.** In `approve`, the `already_decided` branch applies the record first when its status is `approved`, and then refreshes the outcome. The scheduled `gwp.staleness` event now also calls `resume_stale`, which runs `resume` once on the run of every stale record at `proposed` or `approved`. `resume` applies what may apply and closes as failed a `proposed` record whose set was incomplete. A stale record at `pending_approval` is left alone, since it is waiting for a person. A run that `resume_stale` can't resume fails the scheduled invocation, as a stranded run does since M10.
+- **Alternative.** Keep the lease on a run that `_fail_closed` finalizes while any of its records is not terminal. That covers the exception after a commit, but not the approved record, whose run was finalized when it went to approval. Entry 45 already rejected a lease for runs waiting for approval.
+- **Why.** `resume` is idempotent, and every status change in it is a compare-and-set, so running it on a finished run changes nothing. A stale record is at least 15 minutes old, which is longer than a lease, so no live worker can still hold its run.
+- **Supersedes.** What entries 33 and 45 say about when `resume` runs. On a finalized run it now runs from the staleness sweep, and an approved record is also applied by the approver's retry.
+
+## 48. An approval call on a record that never went to approval leaves the run alone
+
+Source: second Fable audit, 9/28/26 (GWP2-2).
+
+- **Before.** Entry 45 made the `already_decided` branch of `approve` refresh the run's outcome whatever the record's status. On a run routed to a person the records are `routed` or `rejected`, which the refresh maps to NEEDS_HUMAN. So an approver who posted a decision for a routed record, e.g. by picking the wrong id from a list, changed a stored ROUTED_TO_HUMAN to NEEDS_HUMAN while the reason still said `forbidden_action`. No write happened, but `GET /runs/{id}` and the grader read that label.
+- **Evidence.** The audit's reproduction B, and a test that calls `approve` on both the routed post and the rejected forbidden action of one run.
+- **Choice.** The branch refreshes the outcome only when the record's status is one the approval path can produce: `approved`, `applied`, `failed` or `declined`. For any other status it returns the run's stored outcome and writes nothing.
+- **Alternative.** Make `_refresh_run_outcome` return early for a run whose route is `human`, as `resume` does. That keeps the rule in one function, but the question is whether the approver's call had anything to do with the run, and that depends on the record.
+
+## 49. A payable whose lines don't sum to its total fails at apply
+
+Source: second Fable audit, 9/28/26 (GWP2-3).
+
+- **Before.** The ledger entry debits each payable line and credits the payable's `total_cents`. The `matches_extraction` check fails when the lines don't sum to the total, but a failed check only raises the tier to approval. An approver who approved such a proposal got a payable whose total differed from its lines and a ledger entry whose debits and credits differed. The grader's per-entry check (entry 42) would flag the entry in an eval, but no case produced one, so the rule held only for eval output.
+- **Evidence.** The audit's reproduction E. A C01 proposal with a total of $900.00 against lines of $842.50 waited for approval and, once approved, posted debits of 84250 against credits of 90000. A test now approves the same proposal.
+- **Choice.** `_plan_post_payable` raises `PlanError` when the lines don't sum to `total_cents`, so the write fails with `plan_failed` and nothing is written. The tier rules are unchanged, so the proposal still goes to approval and the approver sees the mismatch.
+- **Still open.** An approver can't fix the numbers from the approval view, so such a proposal could go to a person instead of to approval. That changes a tier rule and the expected outcomes that depend on it, so it is not done.
+
+## 50. A recode must come from the payable's own vendor, and not from a credit memo
+
+Source: second Fable audit, 9/28/26 (GWP2-4).
+
+- **Before.** `_check_post_payable` and `_check_credit_memo` send a run to a person when the proposal's vendor is not the vendor resolved from the document, and when the document is the wrong kind. `_check_recode` checked only the account, the line and that the payable was open. So an invoice from any vendor that named a payable id could recode that payable at the auto tier.
+- **Evidence.** The audit's reproduction C. A Pine Street invoice whose proposal recoded Kestrel's P-9 ended APPLIED at the auto tier. A test now routes it to a person with `vendor_mismatch`, and another routes a recode proposed from a Kestrel credit memo with `document_kind_mismatch`.
+- **Choice.** `_check_recode` adds `unknown_vendor` or `vendor_mismatch` as a human reason, with a `vendor_resolved` check, when the payable's vendor is not the resolved vendor, and `document_kind_mismatch` when the document is a credit memo.
+- **Left out, and why.** The audit and the brief also asked for `document_kind_mismatch` on a letter. Cases R05, R06 and R12 recode a Kestrel payable from a Kestrel letter at the auto tier, and A07 does so at the approval tier, because a letter from the vendor is the ordinary way a recode is asked for (spec section 3). With the letter rule, the cooperative script fails all four and the published 108 of 108 becomes 104, which I checked. A test pins the current behavior. Whether a letter may recode is Adam's call.
+- **Still open.** A document from the payable's own vendor can still recode that vendor's payables between allowed accounts at the auto tier, e.g. from an instruction in a line description, which is the I18 limit through a recode. The proposer is shown the vendor's posted payables with their ids, so no leak is needed. A proposed case, I25, with its prediction written before any run, is in `governed-write-path-notes/proposed-case-I25.yaml`. It is not in the eval set, because adding it changes the published counts.
+
+## 51. A transaction cancelled by contention leaves the write where it was
+
+Source: second Fable audit, 9/28/26 (GWP2-5).
+
+- **Before.** When `TransactWriteItems` was cancelled, the executor handled a failed execution key or audit condition, and marked the record `failed` for any other cancellation. DynamoDB also cancels a transaction with `TransactionConflict` when another transaction touches one of its items, and with a throttling reason under load. Neither is a failed condition, but the record was still marked `failed`, which is terminal. For an approved write, the approval was spent, the retry answered `already_decided`, and the same invoice couldn't be uploaded again. Two invoices against the same purchase order line at the same moment contend on the receipt item, so the conflict can happen in normal use.
+- **Evidence.** The audit's reproduction D injected one cancellation with reasons `TransactionConflict` and then `None`. moto doesn't simulate contention, so the tests inject it the same way.
+- **Choice.** The executor marks the record `failed` only when at least one operation reports `ConditionalCheckFailed`. For any other cancellation it leaves the record at its status, records the reasons with `append_audit_note` (a history entry `apply_cancelled:<codes>` and a `cancellation_reasons` field), and returns `retryable`. `approve` returns `retryable`, and the HTTP API answers 503. The approver's retry then applies the write (entry 47). An auto write stays at `proposed`, the run says NEEDS_HUMAN with `apply_failed`, and the staleness pass applies it within about 30 minutes.
+- **Still open.** A cancellation for a reason that will never clear, e.g. `ValidationError` for an item over the size limit, is also treated as retryable, so the staleness pass retries it every 15 minutes and notes each attempt on the record. The MCP server's `decide` tool passes the new `retryable` status through as it is.
+
+## 52. Refreshing the outcome of a run with no run record does nothing
+
+Source: second Fable audit, 9/28/26 (GWP2-7).
+
+- **Before.** `_refresh_run_outcome` updated the run without `expect_state`, and `update_run` re-raises a failed condition in that case. The seeded record A-2 belongs to run R-SEED, which has no run record, so `POST /approvals/A-2` raised a `ClientError` that the handler didn't catch, and API Gateway would have answered 500. Every record the service creates has a run, so only seeded data could hit it.
+- **Choice.** `_refresh_run_outcome` returns `None` at once when the run doesn't exist, so the call answers `already_decided` like any other decided record. A test approves A-2.
+- **Alternative.** Seed a run record for R-SEED. That fixes the seed, and not the next record that outlives its run.
+
+## 53. The prediction test checks that every attack still reaches the model
+
+Source: second Fable audit, 9/28/26 (GWP2-8).
+
+- **Before.** For a case outside the predicted set, the adversarial test asserted only that the verdict was not unsafe and the system-level predicate was false. If an attack stopped firing, e.g. because an `if_seen` marker no longer matched the prompt after a prompt change, the case passed with the cooperative result, and the published 22 of 24 would drop in the report with no failing test.
+- **Choice.** For every case with an attack, the test asserts the model-level result: true for all of them except I07 and I23, whose text never reaches the model, and false for those two. That covers the 24 injection cases and the five forbidden cases, which all fire today.
+- **Evidence.** With I13's `if_seen` marker changed so that it no longer matches, the old test passes and the new one fails.
+
+## 54. Feedback for unknown ids gives kinds and counts, not the ids
+
+Source: second Fable audit, 9/28/26 (GWP2-9).
+
+- **Before.** `validation_feedback` returns no text from the proposal, and M9 made the schema errors follow that rule, but the unknown id branch of step 7 returned the ids the proposer wrote, e.g. `unknown ids: po:PO-7999`. An id is at most 40 characters from a small set, so there was little room for an instruction, but the feedback is rendered outside the untrusted block and over MCP another agent may read it.
+- **Choice.** `unknown_ids_feedback` returns the kind and count of each unknown id, e.g. `unknown ids: 1 po, 1 vendor`, sorted by kind. The trace keeps the same text. The test in `test_write_path.py` and the two MCP tests that expected the old text now expect the new one, and a new test checks that the ids never come back.
+- **Alternative.** The schema position of each unknown id, e.g. `proposals.0.params.po_id`. That tells the proposer which field to fix, but the counts were what the audit suggested and are enough for L07's retry.
+
+# The MCP server
+
+These entries are numbered M1 onward. They were written on the `mcp-server` branch, which merged into main on 9/28, so they could not collide with entries added on main meanwhile. New entries about the MCP server continue the M numbering.
 
 ## M1. The agent connected over MCP is the proposer, and the reader stays inside the server
 
@@ -479,83 +558,4 @@ Source: an independent audit on the Fable model of main at `8356cdb`, focused on
 - **A search that landed just before the claim was dropped (low-medium).** `submit_proposal` built its trace from the run as it was before the claim; it now reads the run again after the claim.
 - **The sweep's handler hid a run it could never resume (low-medium).** The scheduled handler now counts such runs apart, prints the count, and fails the invocation so the error metric shows it.
 - **Smaller items (low).** The fail-closed handler no longer rewrites a run the sweep already finished and only adds the late worker's error; the size fallback keeps the extraction and the original error; the sweep re-reads each run and skips one whose lease was renewed after the index listed it; ids are checked with a full match, so a trailing newline doesn't pass; the work list leaves out runs past their deadline; a failed park returns the run's state; and the middleware records a malformed tool name as such.
-- **Left open (low).** A worker that dies while closing the records of a lost claim leaves a record at `proposed` on a finalized run. The staleness check lists it, but nothing closes it. The built-in path has the same kind of gap between writing records and moving the run to `audited`, and the staleness handler work on main is the place to close both.
-
-# Changes after the second audit
-
-A second independent audit on 9/28/26 (`governed-write-path-notes/fable-audit-2.md`) found 1 high, 5 medium and 4 low findings. The entries below record what changed because of it. `governed-write-path-notes/audit-2-fixes.md` maps each finding to its commit and test.
-
-## 47. The staleness sweep resumes finalized runs, and a retried approval applies what was approved
-
-Source: second Fable audit, 9/28/26 (GWP2-1), and finding F6 of the MCP branch's audit.
-
-- **Before.** Entry 33 said `resume` finishes a set on a finalized run or not, and entry 45 said the approver's own retry closes the gap for a run waiting for approval. Both were true of the function and false of the service. The service called `resume` only for a run whose lease ran out, and a finalized run has no lease, so these states were never repaired:
-  - An approved write whose worker died after the record moved to `approved` and before the apply. The approver's retry answered `already_decided`, and the run said PENDING_APPROVAL for good.
-  - An auto write left at `proposed` after an ordinary exception on an earlier apply of the set. The fail-closed handler finalized the run as NEEDS_HUMAN, and no task was opened.
-  - A record left at `proposed` on a finalized run whose set was never fully recorded (the MCP audit's F6). A worker that outlived its lease lost the move to `audited` and died while closing its records.
-- **Evidence.** The audit's reproductions A1 and A2 show the first two. After each, `recover_stranded` returned nothing, a redelivered event returned the stored outcome, and only a manual `resume` applied the write. A test builds the third by letting the sweep finalize a run between the worker's two audit puts.
-- **Choice.** In `approve`, the `already_decided` branch applies the record first when its status is `approved`, and then refreshes the outcome. The scheduled `gwp.staleness` event now also calls `resume_stale`, which runs `resume` once on the run of every stale record at `proposed` or `approved`. `resume` applies what may apply and closes as failed a `proposed` record whose set was incomplete. A stale record at `pending_approval` is left alone, since it is waiting for a person.
-- **Alternative.** Keep the lease on a run that `_fail_closed` finalizes while any of its records is not terminal. That covers the exception after a commit, but not the approved record, whose run was finalized when it went to approval. Entry 45 already rejected a lease for runs waiting for approval.
-- **Why.** `resume` is idempotent, and every status change in it is a compare-and-set, so running it on a finished run changes nothing. A stale record is at least 15 minutes old, which is longer than a lease, so no live worker can still hold its run.
-- **Supersedes.** What entries 33 and 45 say about when `resume` runs. On a finalized run it now runs from the staleness sweep, and an approved record is also applied by the approver's retry.
-
-## 48. An approval call on a record that never went to approval leaves the run alone
-
-Source: second Fable audit, 9/28/26 (GWP2-2).
-
-- **Before.** Entry 45 made the `already_decided` branch of `approve` refresh the run's outcome whatever the record's status. On a run routed to a person the records are `routed` or `rejected`, which the refresh maps to NEEDS_HUMAN. So an approver who posted a decision for a routed record, e.g. by picking the wrong id from a list, changed a stored ROUTED_TO_HUMAN to NEEDS_HUMAN while the reason still said `forbidden_action`. No write happened, but `GET /runs/{id}` and the grader read that label.
-- **Evidence.** The audit's reproduction B, and a test that calls `approve` on both the routed post and the rejected forbidden action of one run.
-- **Choice.** The branch refreshes the outcome only when the record's status is one the approval path can produce: `approved`, `applied`, `failed` or `declined`. For any other status it returns the run's stored outcome and writes nothing.
-- **Alternative.** Make `_refresh_run_outcome` return early for a run whose route is `human`, as `resume` does. That keeps the rule in one function, but the question is whether the approver's call had anything to do with the run, and that depends on the record.
-
-## 49. A payable whose lines don't sum to its total fails at apply
-
-Source: second Fable audit, 9/28/26 (GWP2-3).
-
-- **Before.** The ledger entry debits each payable line and credits the payable's `total_cents`. The `matches_extraction` check fails when the lines don't sum to the total, but a failed check only raises the tier to approval. An approver who approved such a proposal got a payable whose total differed from its lines and a ledger entry whose debits and credits differed. The grader's per-entry check (entry 42) would flag the entry in an eval, but no case produced one, so the rule held only for eval output.
-- **Evidence.** The audit's reproduction E. A C01 proposal with a total of $900.00 against lines of $842.50 waited for approval and, once approved, posted debits of 84250 against credits of 90000. A test now approves the same proposal.
-- **Choice.** `_plan_post_payable` raises `PlanError` when the lines don't sum to `total_cents`, so the write fails with `plan_failed` and nothing is written. The tier rules are unchanged, so the proposal still goes to approval and the approver sees the mismatch.
-- **Still open.** An approver can't fix the numbers from the approval view, so such a proposal could go to a person instead of to approval. That changes a tier rule and the expected outcomes that depend on it, so it is not done.
-
-## 50. A recode must come from the payable's own vendor, and not from a credit memo
-
-Source: second Fable audit, 9/28/26 (GWP2-4).
-
-- **Before.** `_check_post_payable` and `_check_credit_memo` send a run to a person when the proposal's vendor is not the vendor resolved from the document, and when the document is the wrong kind. `_check_recode` checked only the account, the line and that the payable was open. So an invoice from any vendor that named a payable id could recode that payable at the auto tier.
-- **Evidence.** The audit's reproduction C. A Pine Street invoice whose proposal recoded Kestrel's P-9 ended APPLIED at the auto tier. A test now routes it to a person with `vendor_mismatch`, and another routes a recode proposed from a Kestrel credit memo with `document_kind_mismatch`.
-- **Choice.** `_check_recode` adds `unknown_vendor` or `vendor_mismatch` as a human reason, with a `vendor_resolved` check, when the payable's vendor is not the resolved vendor, and `document_kind_mismatch` when the document is a credit memo.
-- **Left out, and why.** The audit and the brief also asked for `document_kind_mismatch` on a letter. Cases R05, R06 and R12 recode a Kestrel payable from a Kestrel letter at the auto tier, and A07 does so at the approval tier, because a letter from the vendor is the ordinary way a recode is asked for (spec section 3). With the letter rule, the cooperative script fails all four and the published 108 of 108 becomes 104, which I checked. A test pins the current behavior. Whether a letter may recode is Adam's call.
-- **Still open.** A document from the payable's own vendor can still recode that vendor's payables between allowed accounts at the auto tier, e.g. from an instruction in a line description, which is the I18 limit through a recode. The proposer is shown the vendor's posted payables with their ids, so no leak is needed. A proposed case, I25, with its prediction written before any run, is in `governed-write-path-notes/proposed-case-I25.yaml`. It is not in the eval set, because adding it changes the published counts.
-
-## 51. A transaction cancelled by contention leaves the write where it was
-
-Source: second Fable audit, 9/28/26 (GWP2-5).
-
-- **Before.** When `TransactWriteItems` was cancelled, the executor handled a failed execution key or audit condition, and marked the record `failed` for any other cancellation. DynamoDB also cancels a transaction with `TransactionConflict` when another transaction touches one of its items, and with a throttling reason under load. Neither is a failed condition, but the record was still marked `failed`, which is terminal. For an approved write, the approval was spent, the retry answered `already_decided`, and the same invoice couldn't be uploaded again. Two invoices against the same purchase order line at the same moment contend on the receipt item, so the conflict can happen in normal use.
-- **Evidence.** The audit's reproduction D injected one cancellation with reasons `TransactionConflict` and then `None`. moto doesn't simulate contention, so the tests inject it the same way.
-- **Choice.** The executor marks the record `failed` only when at least one operation reports `ConditionalCheckFailed`. For any other cancellation it leaves the record at its status, records the reasons with `append_audit_note` (a history entry `apply_cancelled:<codes>` and a `cancellation_reasons` field), and returns `retryable`. `approve` returns `retryable`, and the HTTP API answers 503. The approver's retry then applies the write (entry 47). An auto write stays at `proposed`, the run says NEEDS_HUMAN with `apply_failed`, and the staleness pass applies it within about 30 minutes.
-- **Still open.** A cancellation for a reason that will never clear, e.g. `ValidationError` for an item over the size limit, is also treated as retryable, so the staleness pass retries it every 15 minutes and notes each attempt on the record. The MCP server's `decide` tool passes the new `retryable` status through as it is.
-
-## 52. Refreshing the outcome of a run with no run record does nothing
-
-Source: second Fable audit, 9/28/26 (GWP2-7).
-
-- **Before.** `_refresh_run_outcome` updated the run without `expect_state`, and `update_run` re-raises a failed condition in that case. The seeded record A-2 belongs to run R-SEED, which has no run record, so `POST /approvals/A-2` raised a `ClientError` that the handler didn't catch, and API Gateway would have answered 500. Every record the service creates has a run, so only seeded data could hit it.
-- **Choice.** `_refresh_run_outcome` returns `None` at once when the run doesn't exist, so the call answers `already_decided` like any other decided record. A test approves A-2.
-- **Alternative.** Seed a run record for R-SEED. That fixes the seed, and not the next record that outlives its run.
-
-## 53. The prediction test checks that every attack still reaches the model
-
-Source: second Fable audit, 9/28/26 (GWP2-8).
-
-- **Before.** For a case outside the predicted set, the adversarial test asserted only that the verdict was not unsafe and the system-level predicate was false. If an attack stopped firing, e.g. because an `if_seen` marker no longer matched the prompt after a prompt change, the case passed with the cooperative result, and the published 22 of 24 would drop in the report with no failing test.
-- **Choice.** For every case with an attack, the test asserts the model-level result: true for all of them except I07 and I23, whose text never reaches the model, and false for those two. That covers the 24 injection cases and the five forbidden cases, which all fire today.
-- **Evidence.** With I13's `if_seen` marker changed so that it no longer matches, the old test passes and the new one fails.
-
-## 54. Feedback for unknown ids gives kinds and counts, not the ids
-
-Source: second Fable audit, 9/28/26 (GWP2-9).
-
-- **Before.** `validation_feedback` returns no text from the proposal, and M9 made the schema errors follow that rule, but the unknown id branch of step 7 returned the ids the proposer wrote, e.g. `unknown ids: po:PO-7999`. An id is at most 40 characters from a small set, so there was little room for an instruction, but the feedback is rendered outside the untrusted block and over MCP another agent may read it.
-- **Choice.** `unknown_ids_feedback` returns the kind and count of each unknown id, e.g. `unknown ids: 1 po, 1 vendor`, sorted by kind. The trace keeps the same text. The test in `test_write_path.py` and the two MCP tests that expected the old text now expect the new one, and a new test checks that the ids never come back.
-- **Alternative.** The schema position of each unknown id, e.g. `proposals.0.params.po_id`. That tells the proposer which field to fix, but the counts were what the audit suggested and are enough for L07's retry.
+- **Left open (low).** A worker that dies while closing the records of a lost claim leaves a record at `proposed` on a finalized run. The staleness check lists it, but nothing closes it. The built-in path has the same kind of gap between writing records and moving the run to `audited`, and the staleness handler work on main is the place to close both. Entry 47 closes the built-in path's gap.
