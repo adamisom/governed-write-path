@@ -462,3 +462,58 @@ def test_the_staleness_pass_closes_a_record_left_by_a_worker_that_died_closing_a
     assert (after["outcome"], after["reason"]) == ("NEEDS_HUMAN", "interrupted")
     assert [t["reason_code"] for t in store.list_human_tasks("T1") if t["run_id"] == res.run_id] == ["interrupted"]
     assert not any(p["invoice_number"] == "INV-6001" for p in store.list_payables("T1", "V-101"))
+
+
+def test_a_worker_that_dies_after_the_second_invalid_proposal_leaves_one_task(store, monkeypatch):
+    """Codex 9/29. The task was opened before the run was finalized; a crash between the two left a leased run with
+    no audit records, and the sweep finalized it as `interrupted` with a second task. Now both are one write."""
+    from gwp.orchestrator import RUN_LEASE_SECONDS
+
+    class Die(BaseException):
+        pass
+
+    orch, res, clock = parked(store)
+    orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    monkeypatch.setattr(store, "finalize_run_with_task", lambda *a, **k: (_ for _ in ()).throw(Die()))
+    with pytest.raises(Die):
+        orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    monkeypatch.undo()
+    assert store.list_human_tasks("T1") == []  # nothing was written before the crash
+    clock.advance(RUN_LEASE_SECONDS + 30)
+    assert [r["run_id"] for r in orch.recover_stranded()] == [res.run_id]
+    run = store.get_run("T1", res.run_id)
+    assert (run["outcome"], run["reason"]) == ("NEEDS_HUMAN", "interrupted")
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
+
+
+def test_a_second_invalid_proposal_finalizes_the_run_and_opens_its_task_together(store, monkeypatch):
+    orch, res, _ = parked(store)
+    monkeypatch.setattr(orch, "_open_task", lambda *a: pytest.fail("the task must be written with the run"))
+    for _ in range(2):
+        out = orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    run = store.get_run("T1", res.run_id)
+    assert (out.outcome, run["state"], run["reason"]) == ("NEEDS_HUMAN", "finalized", "invalid_proposal")
+    assert "lease_flag" not in run and len(run["proposal_attempts"]) == 2
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["invalid_proposal"]
+
+
+def test_a_second_invalid_proposal_too_large_to_store_in_full_still_finalizes_with_its_task(store, monkeypatch):
+    from botocore.exceptions import ClientError
+
+    orch, res, _ = parked(store)
+    orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    real = store.finalize_run_with_task
+
+    def finalize(tenant_id, run_id, fields, history, task, expect_state=None):
+        if "model_calls" in fields:
+            raise ClientError({"Error": {"Code": "ValidationException",
+                                         "Message": "Item size to update has exceeded the maximum allowed size"}},
+                              "TransactWriteItems")
+        return real(tenant_id, run_id, fields, history, task, expect_state)
+
+    monkeypatch.setattr(store, "finalize_run_with_task", finalize)
+    out = orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    run = store.get_run("T1", res.run_id)
+    assert (out.reason, run["state"], run["reason"]) == ("invalid_proposal", "finalized", "invalid_proposal")
+    assert run["size_note"] == "run record too large to store in full" and "lease_flag" not in run
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["invalid_proposal"]

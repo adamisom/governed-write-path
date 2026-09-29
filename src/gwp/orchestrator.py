@@ -653,11 +653,10 @@ class Orchestrator:
                     # The sweep finished the run while this proposal was checked; say what it decided.
                     return self._current(self.store.get_run(tenant_id, run_id) or run)
                 return RunResult(run_id, RunOutcome.AWAITING_PROPOSAL, "invalid_proposal", detail=feedback)
-            # The task first, as everywhere else: finalizing drops the lease, so a crash between leaves a leased run
-            # the sweep finishes, never a finalized run with no task.
-            self._open_task(tenant_id, run_id, "invalid_proposal")
+            # The run and its task in one transaction, as cannot_propose does. With the task first, a crash between
+            # left a leased run with no audit records, which the sweep finalized as `interrupted` with a second task.
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "invalid_proposal", trace, t0,
-                                expect_state="proposing")
+                                expect_state="proposing", task=self._task(tenant_id, run_id, "invalid_proposal"))
         return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
                             trace, t0, claimed_state="proposing")
 
@@ -817,7 +816,10 @@ class Orchestrator:
     # -- step 13: finalize ----------------------------------------------------------------
 
     def _finish(self, tenant_id, run_id, outcome, reason, trace, t0, audit_ids=None, decision=None, extra=None,
-                expect_state=None):
+                expect_state=None, task=None):
+        """Finalize the run. With `task`, the run and its task for a person are written in one transaction, for a
+        run with no audit records: after a crash between two writes, `resume` would open a second task under
+        another reason (DECISIONS M14)."""
         costs = [c["cost_usd"] for c in trace["model_calls"] if c.get("cost_usd") is not None]
         fields = {
             "state": "finalized", "outcome": outcome, "reason": reason, "ended_at": self.clock.now(),
@@ -835,8 +837,14 @@ class Orchestrator:
             fields["applied_audit_ids"] = [a["audit_id"] for a in self.store.list_audits(tenant_id, run_id)
                                            if a["status"] == "applied"]
         history = (f"finalized:{outcome}", fields["ended_at"])
+
+        def write(f: dict) -> bool:
+            if task is None:
+                return self.store.update_run(tenant_id, run_id, f, history, expect_state=expect_state)
+            return self.store.finalize_run_with_task(tenant_id, run_id, f, history, task, expect_state=expect_state)
+
         try:
-            if not self.store.update_run(tenant_id, run_id, fields, history, expect_state=expect_state):
+            if not write(fields):
                 return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         except ClientError as e:
             if e.response["Error"]["Code"] != "ValidationException":
@@ -847,7 +855,7 @@ class Orchestrator:
                                             "applied_audit_ids", "extraction", "extraction_flags", "error")
                      if k in fields}
             small["size_note"] = "run record too large to store in full"
-            if not self.store.update_run(tenant_id, run_id, small, history, expect_state=expect_state):
+            if not write(small):
                 return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         return RunResult(run_id, outcome, reason, audit_ids or [])
 

@@ -593,3 +593,13 @@ Source: the item M10 left open, checked on 9/29 after entry 47 merged.
 - **Evidence.** A test builds the case on the MCP path: the sweep finishes the run while the worker writes its record, the worker loses the move to `audited`, and it dies while closing. After 15 minutes `resume_stale` (entry 47) resumes the run, and `resume` closes the record as failed with `audit_set_incomplete`, because the set was never fully recorded. The run keeps the sweep's outcome and reason, NEEDS_HUMAN and `interrupted`, and it has one task, since a task is keyed by run and reason.
 - **Choice.** No code change. Entry 47 already covers it, and the test pins that.
 
+
+## M14. A second invalid proposal finalizes the run and opens its task in one transaction
+
+Source: a Codex review of the whole repository at `ee8de7a`, 9/29, reproduced by a Fable sub-agent the same day.
+
+- **Before.** On the MCP path, a second invalid proposal opened an `invalid_proposal` task and then finalized the run in a second write. A worker that died between the two left a leased run with no audit records. The sweep's `resume` finalized it as `interrupted` and opened a second task, so a person got two tasks for one run, and the run's reason said `interrupted`. The task key is the run and the reason, so it can't stop two tasks with different reasons. Nothing reached the ledger.
+- **Choice.** `_finish` takes an optional task and then finalizes with `finalize_run_with_task`, which writes the run and the task in one transaction, as `cannot_propose` (M7) and `resume` (entry 44) already do. The size fallback goes through the same transaction. A crash before the transaction leaves no task, and the sweep opens exactly one, under the reason it records on the run. Three tests cover the crash, the single write, and the size fallback, and all three fail on the old code.
+- **Alternative.** Write the pending reason on the run before opening the task, and have `resume` use it. That adds a write and a field and departs from the rule the other paths follow.
+- **Checked.** A Fable sub-agent checked every other place a task is opened before the run moves on. A routed run and the fail-closed handler are safe, because the run already records its route reason, and `resume` reopens the task under the same reason and key.
+- **Still open (low).** On the built-in path, the task for a vendor's bank change request is opened before the run moves to `audited`. A crash between the two leaves the set incomplete, so `resume` closes the records as failed and opens an `interrupted` task too. A person gets two tasks, and nothing posts. Fixing it needs the move to `audited` and the task in one transaction, a new store method. It is left for the next round.
