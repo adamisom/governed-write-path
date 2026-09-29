@@ -84,8 +84,8 @@ Requires [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync --all-extras
-uv run pytest -m "not eval"                     # unit tests, 225 of them, about 70 seconds
-uv run pytest                                   # everything, 682 tests including all 109 cases with both scripts, directly and through the MCP server, about 5 minutes
+uv run pytest -m "not eval"                     # unit tests, 227 of them, about 70 seconds
+uv run pytest                                   # everything, 684 tests including all 109 cases with both scripts, directly and through the MCP server, about 5 minutes
 uv run gwp eval --mode offline --out eval-out   # writes eval-out/eval-offline-cooperative-adversarial.md and .json
 uv run gwp generate-docs                        # re-render the case PDFs and check each one against its spec
 ```

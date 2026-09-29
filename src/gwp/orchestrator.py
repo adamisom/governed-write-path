@@ -431,15 +431,21 @@ class Orchestrator:
             self.store.put_audit(audit)
             audit_ids.append(audit["audit_id"])
         bank_followup = route == "auto" and VendorRequest.bank_details_change in extraction.vendor_requests
+        # The whole set is recorded. From here on, `resume` may finish it; before this, it may not.
+        audited = {"state": "audited", "audit_ids": audit_ids, "audit_set_complete": True, "route": route,
+                   "route_reason": reason}
         if bank_followup:
             # The written policy sends any bank change request to a person. The agent can't act on it, and the
             # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
-            self._open_task(tenant_id, run_id, "vendor_requested_bank_change")
-        # The whole set is recorded. From here on, `resume` may finish it; before this, it may not.
-        if not self.store.update_run(tenant_id, run_id, {"state": "audited", "audit_ids": audit_ids,
-                                                         "audit_set_complete": True, "route": route,
-                                                         "route_reason": reason}, ("audited", self.clock.now()),
-                                     expect_state=claimed_state):
+            # The task is written with the move to `audited`: opened first, a crash between left the set
+            # incomplete, and `resume` opened a second, `interrupted` task (DECISIONS 56).
+            moved = self.store.update_run_with_task(tenant_id, run_id, audited, ("audited", self.clock.now()),
+                                                    self._task(tenant_id, run_id, "vendor_requested_bank_change"),
+                                                    expect_state=claimed_state)
+        else:
+            moved = self.store.update_run(tenant_id, run_id, audited, ("audited", self.clock.now()),
+                                          expect_state=claimed_state)
+        if not moved:
             # The sweep finished this run after the lease renewal above, so it may have seen an incomplete set.
             # Nothing has applied; close these records, and leave the run as the sweep left it.
             for aid in audit_ids:

@@ -638,8 +638,9 @@ def test_a_plan_that_no_longer_fits_fails_with_a_named_error_not_an_assert(store
     assert store.get_payable("T1", "P-2")["status"] == "open"
 
 
-def test_resume_opens_an_interrupted_task_even_when_the_run_already_has_another_task(store):
-    """A bank change follow-up task exists before the set is marked recorded; a person must still see the stop."""
+def test_a_crash_before_the_bank_change_run_is_audited_leaves_one_task(store):
+    """The bank change follow-up task was opened before the set was marked recorded, so a crash between gave the
+    person two tasks, the follow-up and `interrupted`. Both now go in one write (DECISIONS 56)."""
     doc = {**C01_DOC, "invoice_number": "INV-BANK", "vendor_requests": ["bank_details_change"]}
     ext = documents.faithful_extraction(doc)
     orch, _, _ = build(store, [{"tool": "Extraction", "input": ext}],
@@ -650,16 +651,51 @@ def test_resume_opens_an_interrupted_task_even_when_the_run_already_has_another_
     class Die(BaseException):
         pass
 
-    real = store.update_run
-    store.update_run = lambda t, r, f, *a, **k: (_ for _ in ()).throw(Die()) if f.get("state") == "audited" \
-        else real(t, r, f, *a, **k)
+    real = store.update_run_with_task
+    store.update_run_with_task = lambda *a, **k: (_ for _ in ()).throw(Die())
     with pytest.raises(Die):
         orch.process("T1", up.run_id)
-    store.update_run = real
+    store.update_run_with_task = real
+    assert store.list_human_tasks("T1") == []
     assert orch.resume("T1", up.run_id).reason == "interrupted"
-    assert sorted(t["reason_code"] for t in store.list_human_tasks("T1")) == [
-        "interrupted", "vendor_requested_bank_change"]
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["interrupted"]
     assert not any(p["invoice_number"] == "INV-BANK" for p in store.list_payables("T1", "V-101"))
+
+
+def test_the_bank_change_task_is_written_with_the_move_to_audited(store, monkeypatch):
+    doc = {**C01_DOC, "invoice_number": "INV-BANK", "vendor_requests": ["bank_details_change"]}
+    ext = documents.faithful_extraction(doc)
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": ext}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(params={"invoice_number": "INV-BANK"})]}}])
+    monkeypatch.setattr(orch, "_open_task", lambda *a: pytest.fail("the task must be written with the run"))
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    assert orch.process("T1", up.run_id).outcome == "APPLIED"
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["vendor_requested_bank_change"]
+    run = store.get_run("T1", up.run_id)
+    assert "audited" in [h["state"] for h in run["history"]] and run["audit_set_complete"]
+
+
+def test_a_sweep_that_finished_the_run_first_leaves_no_bank_change_task(store):
+    """The move to `audited` is conditional on the claim; if it loses, the task in the same transaction isn't
+    written either, and the records are closed as `claim_lost`."""
+    doc = {**C01_DOC, "invoice_number": "INV-BANK", "vendor_requests": ["bank_details_change"]}
+    ext = documents.faithful_extraction(doc)
+    orch, _, _ = build(store, [{"tool": "Extraction", "input": ext}],
+                       [{"tool": "propose_write", "input": {"proposals": [
+                           c01_post(params={"invoice_number": "INV-BANK"})]}}])
+    up = orch.upload("T1", documents.render(doc), "application/pdf", UPLOADER)
+    real_put = store.put_audit
+
+    def sweep_then_put(audit):
+        store.update_run("T1", up.run_id, {"state": "finalized", "outcome": "NEEDS_HUMAN", "reason": "interrupted"})
+        real_put(audit)
+
+    store.put_audit = sweep_then_put
+    orch.process("T1", up.run_id)
+    store.put_audit = real_put
+    assert store.list_human_tasks("T1") == []
+    assert {a["status"] for a in store.list_audits("T1", up.run_id)} == {"failed"}
 
 
 # -- a worker that dies after claiming a run (Codex review finding 2) ----------------------------------------

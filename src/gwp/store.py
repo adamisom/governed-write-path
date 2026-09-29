@@ -427,6 +427,12 @@ class DynamoStore:
         """
         if fields.get("state") != "finalized":
             raise ValueError("finalize_run_with_task must finalize the run")
+        return self.update_run_with_task(tenant_id, run_id, fields, history, task, expect_state)
+
+    def update_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
+                             task: dict, expect_state: str | None = None) -> bool:
+        """Update a run and open a task for a person in one transaction. Returns False if the run had left
+        `expect_state`. If the task is open already, the run is updated by itself."""
         update = self._run_update(tenant_id, run_id, fields, history, expect_state)
         try:
             self.client.transact_write_items(TransactItems=[
@@ -441,7 +447,7 @@ class DynamoStore:
             if reasons[:1] == ["ConditionalCheckFailed"]:
                 return False  # another worker or sweep moved the run on first
             if reasons[1:2] == ["ConditionalCheckFailed"]:
-                # The task is open already, so finalizing by itself leaves nothing to lose.
+                # The task is open already, so updating the run by itself leaves nothing to lose.
                 return self.update_run(tenant_id, run_id, fields, history, expect_state)
             raise
         return True
