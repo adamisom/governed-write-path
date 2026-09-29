@@ -262,10 +262,10 @@ def test_the_sweep_goes_on_past_a_run_it_cannot_resume(store, monkeypatch):
     clock.advance(PROPOSAL_LEASE_SECONDS + 60)
     real = orch.resume
 
-    def resume(tenant_id, run_id):
+    def resume(tenant_id, run_id, **kw):
         if run_id == first.run_id:
             raise RuntimeError("this run can't be resumed")
-        return real(tenant_id, run_id)
+        return real(tenant_id, run_id, **kw)
 
     monkeypatch.setattr(orch, "resume", resume)
     rows = {r["run_id"]: r for r in orch.recover_stranded()}
@@ -474,7 +474,7 @@ def test_a_worker_that_dies_after_the_second_invalid_proposal_leaves_one_task(st
 
     orch, res, clock = parked(store)
     orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
-    monkeypatch.setattr(store, "finalize_run_with_task", lambda *a, **k: (_ for _ in ()).throw(Die()))
+    monkeypatch.setattr(store, "update_run_with_task", lambda *a, **k: (_ for _ in ()).throw(Die()))
     with pytest.raises(Die):
         orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
     monkeypatch.undo()
@@ -497,23 +497,84 @@ def test_a_second_invalid_proposal_finalizes_the_run_and_opens_its_task_together
     assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["invalid_proposal"]
 
 
-def test_a_second_invalid_proposal_too_large_to_store_in_full_still_finalizes_with_its_task(store, monkeypatch):
+@pytest.mark.parametrize("error,reasons", [
+    ("ValidationException", []),  # what moto raises
+    ("TransactionCanceledException", [{"Code": "ValidationError"}, {"Code": "None"}]),  # what DynamoDB reports
+])
+def test_a_second_invalid_proposal_too_large_to_store_in_full_still_finalizes_with_its_task(store, monkeypatch,
+                                                                                            error, reasons):
     from botocore.exceptions import ClientError
 
     orch, res, _ = parked(store)
     orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
-    real = store.finalize_run_with_task
+    real = store.update_run_with_task
 
-    def finalize(tenant_id, run_id, fields, history, task, expect_state=None):
+    def finalize(tenant_id, run_id, fields, history, task, expect_state=None, **conditions):
         if "model_calls" in fields:
-            raise ClientError({"Error": {"Code": "ValidationException",
-                                         "Message": "Item size to update has exceeded the maximum allowed size"}},
-                              "TransactWriteItems")
-        return real(tenant_id, run_id, fields, history, task, expect_state)
+            raise ClientError({"Error": {"Code": error, "Message": "Item size to update has exceeded the maximum"},
+                               "CancellationReasons": reasons}, "TransactWriteItems")
+        return real(tenant_id, run_id, fields, history, task, expect_state, **conditions)
 
-    monkeypatch.setattr(store, "finalize_run_with_task", finalize)
+    monkeypatch.setattr(store, "update_run_with_task", finalize)
     out = orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
     run = store.get_run("T1", res.run_id)
     assert (out.reason, run["state"], run["reason"]) == ("invalid_proposal", "finalized", "invalid_proposal")
     assert run["size_note"] == "run record too large to store in full" and "lease_flag" not in run
     assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["invalid_proposal"]
+
+
+def _cancel_next_transaction(store, monkeypatch, code="TransactionConflict"):
+    from botocore.exceptions import ClientError
+
+    real = store.client.transact_write_items
+    calls = []
+
+    def cancel_once(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise ClientError({"Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                               "CancellationReasons": [{"Code": code}, {"Code": "None"}]}, "TransactWriteItems")
+        return real(**kw)
+
+    monkeypatch.setattr(store.client, "transact_write_items", cancel_once)
+
+
+def test_a_second_invalid_proposal_whose_transaction_is_cancelled_by_contention_still_gets_its_task(store,
+                                                                                                    monkeypatch):
+    """Third audit, GWP3-2. A cancellation that is not a failed condition raised, the fail-closed handler finalized
+    the run as internal_error, and the run had no task, no lease and no records, so nothing revisited it."""
+    orch, res, _ = parked(store)
+    orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    _cancel_next_transaction(store, monkeypatch)
+    out = orch.submit_proposal("T1", res.run_id, {"proposals": []}, AGENT)
+    run = store.get_run("T1", res.run_id)
+    assert (out.reason, run["state"], run["reason"]) == ("invalid_proposal", "finalized", "invalid_proposal")
+    assert [t["reason_code"] for t in store.list_human_tasks("T1")] == ["invalid_proposal"]
+
+
+def test_the_sweep_leaves_a_run_an_agent_claimed_after_the_sweep_read_it(store, monkeypatch):
+    """Third audit, GWP3-3. The sweep re-read the run, an agent's claim landed, and `resume` finalized the run
+    anyway, because it never looked at the lease. The finalize is now conditional on the lease having run out."""
+    from gwp.orchestrator import PROPOSAL_LEASE_SECONDS, RUN_LEASE_SECONDS
+    from gwp.runtime import iso_plus
+
+    orch, res, clock = parked(store)
+    clock.advance(PROPOSAL_LEASE_SECONDS + 60)
+    real_get, reads = store.get_run, []
+
+    def get_run(tenant_id, run_id):
+        run = real_get(tenant_id, run_id)
+        reads.append(run_id)
+        if len(reads) == 1:  # the sweep's re-read; the agent's claim lands right after it
+            now = clock.now()
+            assert store.update_run("T1", res.run_id, {"state": "proposing",
+                                                       "lease_until": iso_plus(now, RUN_LEASE_SECONDS)},
+                                    expect_state="awaiting_proposal")
+        return run
+
+    monkeypatch.setattr(store, "get_run", get_run)
+    rows = orch.recover_stranded()
+    monkeypatch.undo()
+    assert [r["outcome"] for r in rows] == ["IN_PROGRESS"]
+    assert store.get_run("T1", res.run_id)["state"] == "proposing"
+    assert store.list_human_tasks("T1") == []

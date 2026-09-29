@@ -24,7 +24,7 @@ def test_the_approvers_retry_applies_a_write_whose_worker_died_before_the_apply(
     assert store.get_audit("T1", aid)["status"] == "approved"
     assert orch.recover_stranded() == []  # a run waiting for approval has no lease, so the sweep never sees it
     retry = orch.approve("T1", aid, APPROVER, "approve")
-    assert (retry.status, retry.run_outcome, retry.detail) == ("already_decided", "APPLIED", "applied")
+    assert (retry.status, retry.run_outcome, retry.detail) == ("applied", "APPLIED", "applied_on_retry")
     assert store.get_audit("T1", aid)["status"] == "applied"
     assert store.get_run("T1", res.run_id)["outcome"] == "APPLIED"
     assert len(store.list_payables("T1", "V-101")) == 2
@@ -298,7 +298,7 @@ def test_an_approval_whose_transaction_is_cancelled_by_contention_stays_approved
     assert audit["history"][-1]["state"] == f"apply_cancelled:{code}"
     assert len(store.list_payables("T1", "V-101")) == 1
     retry = orch.approve("T1", aid, APPROVER, "approve")
-    assert (retry.status, retry.run_outcome) == ("already_decided", "APPLIED")
+    assert (retry.status, retry.run_outcome) == ("applied", "APPLIED")
     assert store.get_audit("T1", aid)["status"] == "applied"
     assert len(store.list_payables("T1", "V-101")) == 2
     assert orch.upload("T1", documents.render(C01_DOC), "application/pdf", UPLOADER).duplicate
@@ -362,7 +362,7 @@ def test_the_api_answers_503_for_an_approval_cancelled_by_contention_and_the_ret
     finally:
         api.set_orchestrator_factory(None)
     assert first["statusCode"] == 503 and json.loads(first["body"])["status"] == "retryable"
-    assert second["statusCode"] == 409 and json.loads(second["body"])["run_outcome"] == "APPLIED"
+    assert second["statusCode"] == 200 and json.loads(second["body"])["run_outcome"] == "APPLIED"
 
 
 # -- GWP2-7: approve on a record whose run record doesn't exist raised out of the API ----------------------------------

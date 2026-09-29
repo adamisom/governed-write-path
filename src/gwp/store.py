@@ -343,8 +343,12 @@ class DynamoStore:
         return self._query(RECORDS, tenant_pk(tenant_id), "RUN#")
 
     def _run_update(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None,
-                    expect_state: str | None) -> dict:
-        """Build the conditional update of a run, as keyword arguments for UpdateItem or a transaction's Update."""
+                    expect_state: str | None, lease_before: str | None = None, set_incomplete: bool = False) -> dict:
+        """Build the conditional update of a run, as keyword arguments for UpdateItem or a transaction's Update.
+
+        `lease_before`: only if the run's lease, if any, ran out before that time. `set_incomplete`: only if the
+        run's proposal set is not yet marked recorded (`audit_set_complete`).
+        """
         names: dict[str, str] = {}
         values: dict[str, Any] = {}
         condition = "attribute_exists(pk)"
@@ -352,6 +356,13 @@ class DynamoStore:
             names["#state"] = "state"
             values[":expect_state"] = expect_state
             condition += " AND #state = :expect_state"
+        if lease_before is not None:
+            names["#lease"] = "lease_until"
+            values[":lease_before"] = lease_before
+            condition += " AND (attribute_not_exists(#lease) OR #lease < :lease_before)"
+        if set_incomplete:
+            names["#complete"] = "audit_set_complete"
+            condition += " AND attribute_not_exists(#complete)"
         sets = []
         for i, (k, v) in enumerate(fields.items()):
             names[f"#f{i}"] = k
@@ -372,15 +383,18 @@ class DynamoStore:
                 "ExpressionAttributeNames": names, "ExpressionAttributeValues": serialize_values(values)}
 
     def update_run(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str] | None = None,
-                   expect_state: str | None = None) -> bool:
+                   expect_state: str | None = None, **conditions) -> bool:
         """Set fields on a run. With `expect_state`, only if the run is still in that state; returns False if not.
+        `conditions` are `_run_update`'s other conditions, and a failed one also returns False.
 
         Finalizing a run removes its lease, so it leaves the `leased_runs` index.
         """
+        conditional = expect_state is not None or any(conditions.values())
         try:
-            self.client.update_item(**self._run_update(tenant_id, run_id, fields, history, expect_state))
+            self.client.update_item(**self._run_update(tenant_id, run_id, fields, history, expect_state,
+                                                       **conditions))
         except ClientError as e:
-            if expect_state is not None and e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            if conditional and e.response["Error"]["Code"] == "ConditionalCheckFailedException":
                 return False
             raise
         return True
@@ -418,7 +432,7 @@ class DynamoStore:
         return True
 
     def finalize_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
-                               task: dict, expect_state: str | None = None) -> bool:
+                               task: dict, expect_state: str | None = None, **conditions) -> bool:
         """Finalize a run and open its task for a person in one transaction. Returns False if the run had left
         `expect_state`.
 
@@ -427,13 +441,14 @@ class DynamoStore:
         """
         if fields.get("state") != "finalized":
             raise ValueError("finalize_run_with_task must finalize the run")
-        return self.update_run_with_task(tenant_id, run_id, fields, history, task, expect_state)
+        return self.update_run_with_task(tenant_id, run_id, fields, history, task, expect_state, **conditions)
 
     def update_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
-                             task: dict, expect_state: str | None = None) -> bool:
+                             task: dict, expect_state: str | None = None, **conditions) -> bool:
         """Update a run and open a task for a person in one transaction. Returns False if the run had left
-        `expect_state`. If the task is open already, the run is updated by itself."""
-        update = self._run_update(tenant_id, run_id, fields, history, expect_state)
+        `expect_state` or failed one of `conditions`. If the task is open already, the run is updated by itself.
+        Any other cancellation, e.g. contention, raises the `ClientError` for the caller to handle."""
+        update = self._run_update(tenant_id, run_id, fields, history, expect_state, **conditions)
         try:
             self.client.transact_write_items(TransactItems=[
                 {"Update": update},
@@ -448,7 +463,7 @@ class DynamoStore:
                 return False  # another worker or sweep moved the run on first
             if reasons[1:2] == ["ConditionalCheckFailed"]:
                 # The task is open already, so updating the run by itself leaves nothing to lose.
-                return self.update_run(tenant_id, run_id, fields, history, expect_state)
+                return self.update_run(tenant_id, run_id, fields, history, expect_state, **conditions)
             raise
         return True
 

@@ -184,6 +184,14 @@ def unknown_ids_feedback(unknown: list[str]) -> str:
     return "unknown ids: " + ", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()))
 
 
+def too_large(e: ClientError) -> bool:
+    """Whether a write failed because the item would pass DynamoDB's 400 KB limit. A single UpdateItem reports it
+    as a ValidationException; inside a transaction it is a `ValidationError` cancellation reason."""
+    code = e.response["Error"]["Code"]
+    reasons = [r.get("Code") for r in e.response.get("CancellationReasons", [])]
+    return code == "ValidationException" or (code == "TransactionCanceledException" and "ValidationError" in reasons)
+
+
 def validate_extraction(ext: Extraction) -> list[str]:
     """Step 4. A failed check is recorded and forces the approval tier; it does not stop the run."""
     flags: list[str] = []
@@ -439,9 +447,8 @@ class Orchestrator:
             # remit-to on this document matched the vendor record, so the payable posts and a person follows up.
             # The task is written with the move to `audited`: opened first, a crash between left the set
             # incomplete, and `resume` opened a second, `interrupted` task (DECISIONS 56).
-            moved = self.store.update_run_with_task(tenant_id, run_id, audited, ("audited", self.clock.now()),
-                                                    self._task(tenant_id, run_id, "vendor_requested_bank_change"),
-                                                    expect_state=claimed_state)
+            moved = self._update_run_with_task(tenant_id, run_id, audited, ("audited", self.clock.now()),
+                                               "vendor_requested_bank_change", expect_state=claimed_state)
         else:
             moved = self.store.update_run(tenant_id, run_id, audited, ("audited", self.clock.now()),
                                           expect_state=claimed_state)
@@ -662,7 +669,7 @@ class Orchestrator:
             # The run and its task in one transaction, as cannot_propose does. With the task first, a crash between
             # left a leased run with no audit records, which the sweep finalized as `interrupted` with a second task.
             return self._finish(tenant_id, run_id, RunOutcome.NEEDS_HUMAN, "invalid_proposal", trace, t0,
-                                expect_state="proposing", task=self._task(tenant_id, run_id, "invalid_proposal"))
+                                expect_state="proposing", task_reason="invalid_proposal")
         return self._decide(tenant_id, run_id, doc, extraction, ctx, proposal_set, cross_tenant, policy, tenant,
                             trace, t0, claimed_state="proposing")
 
@@ -822,9 +829,9 @@ class Orchestrator:
     # -- step 13: finalize ----------------------------------------------------------------
 
     def _finish(self, tenant_id, run_id, outcome, reason, trace, t0, audit_ids=None, decision=None, extra=None,
-                expect_state=None, task=None):
-        """Finalize the run. With `task`, the run and its task for a person are written in one transaction, for a
-        run with no audit records: after a crash between two writes, `resume` would open a second task under
+                expect_state=None, task_reason=None):
+        """Finalize the run. With `task_reason`, the run and its task for a person are written in one transaction,
+        for a run with no audit records: after a crash between two writes, `resume` would open a second task under
         another reason (DECISIONS M14)."""
         costs = [c["cost_usd"] for c in trace["model_calls"] if c.get("cost_usd") is not None]
         fields = {
@@ -845,15 +852,15 @@ class Orchestrator:
         history = (f"finalized:{outcome}", fields["ended_at"])
 
         def write(f: dict) -> bool:
-            if task is None:
+            if task_reason is None:
                 return self.store.update_run(tenant_id, run_id, f, history, expect_state=expect_state)
-            return self.store.finalize_run_with_task(tenant_id, run_id, f, history, task, expect_state=expect_state)
+            return self._update_run_with_task(tenant_id, run_id, f, history, task_reason, expect_state)
 
         try:
             if not write(fields):
                 return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         except ClientError as e:
-            if e.response["Error"]["Code"] != "ValidationException":
+            if not too_large(e):
                 raise
             # The full record would pass DynamoDB's item size limit. Finalize with the outcome only, so the run
             # still ends and leaves the sweep's index; the audit records keep the detail.
@@ -865,7 +872,8 @@ class Orchestrator:
                 return self._current(self.store.get_run(tenant_id, run_id) or {"run_id": run_id})
         return RunResult(run_id, outcome, reason, audit_ids or [])
 
-    def resume(self, tenant_id: str, run_id: str) -> RunResult:
+    def resume(self, tenant_id: str, run_id: str, lease_expired_by: str | None = None,
+               _again: bool = False) -> RunResult:
         """Redeliver a run whose worker died or raised: finish what its audit records say is left, then finalize.
 
         Safe to call any number of times. Execution keys make a repeated apply a no-op, and every status change
@@ -879,6 +887,10 @@ class Orchestrator:
           or not the run was finalized, e.g. by the fail-closed handler after one write of a set committed.
         - A run routed to a person always gets its task, even if its records were closed before the worker died.
           A task is opened at most once per run and reason, so two sweeps that resume the same run open one.
+
+        The sweep passes `lease_expired_by`, its own time. A run with no records, or an incomplete set, is then
+        finalized only if its lease ran out before that time, so a worker that claimed or renewed the run after the
+        sweep looked keeps it (entry 59).
         """
         run = self.store.get_run(tenant_id, run_id)
         if run is None:
@@ -898,18 +910,28 @@ class Orchestrator:
             if not self.store.finalize_run_with_task(
                     tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
                                         "reason": reason}, ("finalized_on_resume", now),
-                    self._task(tenant_id, run_id, reason), expect_state=run["state"]):
+                    self._task(tenant_id, run_id, reason), expect_state=run["state"],
+                    lease_before=lease_expired_by):
                 return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, reason)
         audit_ids = [a["audit_id"] for a in audits]
         if not run.get("audit_set_complete"):
+            # Finalize the run with its task first, on the condition that the set is still incomplete and the run
+            # is where it was read. A worker that outlived its lease and marks the set complete first wins, and
+            # this reads again and finishes the set by tier (entry 60). The worker's own move to `audited` is
+            # conditional on its claim, so once this lands, the worker closes what it wrote as `claim_lost`. A
+            # crash before the records below are closed leaves them to the staleness pass (M13).
+            if not self._update_run_with_task(
+                    tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
+                                        "reason": "interrupted", "audit_ids": audit_ids},
+                    ("finalized_on_resume", now), "interrupted", run["state"], set_incomplete=True,
+                    lease_before=lease_expired_by):
+                if _again:
+                    return RunResult(run_id, RunOutcome.IN_PROGRESS, None)
+                return self.resume(tenant_id, run_id, lease_expired_by, _again=True)
             for a in audits:
                 self.store.transition_audit(tenant_id, a["audit_id"], [AuditStatus.proposed], AuditStatus.failed,
                                             now, {"error": "audit_set_incomplete"}, terminal=True)
-            self._open_task(tenant_id, run_id, "interrupted")
-            self.store.update_run(tenant_id, run_id, {"state": "finalized", "outcome": RunOutcome.NEEDS_HUMAN,
-                                                      "reason": "interrupted", "audit_ids": audit_ids},
-                                  ("finalized_on_resume", now))
             return RunResult(run_id, RunOutcome.NEEDS_HUMAN, "interrupted", audit_ids)
 
         routed = False
@@ -947,6 +969,22 @@ class Orchestrator:
             return RunResult(run_id, outcome, run.get("route_reason"), audit_ids)
         return RunResult(run_id, outcome, run.get("reason"), audit_ids)
 
+    def _update_run_with_task(self, tenant_id: str, run_id: str, fields: dict, history: tuple[str, str],
+                              reason: str, expect_state: str | None, **conditions) -> bool:
+        """Update the run and open its task in one transaction (M14, entries 44 and 56). If contention or throttling
+        cancels the transaction, fall back to the task first and then the run, which keeps its lease until the task
+        exists, so the sweep can finish it (entry 58). A crash between those two can still give a second task, but
+        it can't lose the task, and the fallback runs only after a cancellation."""
+        task = self._task(tenant_id, run_id, reason)
+        try:
+            return self.store.update_run_with_task(tenant_id, run_id, fields, history, task, expect_state,
+                                                   **conditions)
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "TransactionCanceledException" or too_large(e):
+                raise
+            self._open_task(tenant_id, run_id, reason)
+            return self.store.update_run(tenant_id, run_id, fields, history, expect_state, **conditions)
+
     def _task(self, tenant_id: str, run_id: str, reason: str) -> dict:
         return {"tenant_id": tenant_id, "task_id": self.ids.new("H"), "run_id": run_id, "reason_code": reason,
                 "status": "open", "created_at": self.clock.now()}
@@ -978,11 +1016,17 @@ class Orchestrator:
              "decline_note": (note or "")[:500]}, terminal=(to == AuditStatus.declined))
         if not ok:
             current = self.store.get_audit(tenant_id, audit_id) or {}
-            if current.get("status") == AuditStatus.approved:
-                # The worker died after the approval and before the apply. The run is finalized, so it has no lease
-                # and the sweep never visits it; the approver's retry applies what was approved (entry 47).
-                self.executor.apply(tenant_id, audit_id)
-                current = self.store.get_audit(tenant_id, audit_id) or {}
+            if current.get("status") == AuditStatus.approved and decision == "approve":
+                # The worker died after the approval and before the apply, or contention cancelled the apply. The
+                # run is finalized, so it has no lease; the approver's retry applies what was approved (entry 47)
+                # and says so. Any other decision changes nothing: a recorded approval can't be withdrawn, and the
+                # staleness pass applies it anyway (entry 57).
+                res = self.executor.apply(tenant_id, audit_id)
+                outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
+                status = "applied" if res.status in ("applied", "already_applied") else \
+                    "retryable" if res.status == "retryable" else "failed"
+                return DecisionResult(status, audit_id, outcome, detail="applied_on_retry" if status == "applied"
+                                      else None)
             if current.get("status") in ("approved", "applied", "failed", "declined"):  # what approval can produce
                 # A retry after a crash between the write and the run update repairs the run's outcome (case D12).
                 outcome = self._refresh_run_outcome(tenant_id, audit["run_id"])
@@ -1063,7 +1107,7 @@ class Orchestrator:
             if fresh.get("lease_until") and fresh["lease_until"] >= now:
                 continue
             try:
-                row["outcome"] = self.resume(run["tenant_id"], run["run_id"]).outcome
+                row["outcome"] = self.resume(run["tenant_id"], run["run_id"], lease_expired_by=now).outcome
             except Exception as exc:  # noqa: BLE001 - one run that can't be resumed must not stop the others
                 row["outcome"], row["error"] = None, repr(exc)[:300]
             out.append(row)

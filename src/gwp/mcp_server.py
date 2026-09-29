@@ -313,8 +313,9 @@ def build_server(orch: Orchestrator, resolve_caller: CallerResolver, *, name: st
 
     @server.tool(description="Approve or decline one write waiting for approval. decision is 'approve' or "
                              "'decline'; anything else is refused and blocks the write. An approved write is "
-                             "applied at once; if contention cancels the apply, status is 'retryable' and the "
-                             "same call again applies it. A second decision on the same write changes nothing.")
+                             "applied at once; if contention cancels the apply, status is 'retryable', and the "
+                             "same 'approve' call again applies it and returns 'applied'. A recorded approval "
+                             "can't be withdrawn, and any other second decision changes nothing.")
     def decide(audit_id: str, decision: str, note: str | None = None) -> dict[str, Any]:
         c = guard("decide", audit_id=audit_id)
         res = call(c, "decide", lambda: orch.approve(c.tenant_id, audit_id, c.principal, decision, note),

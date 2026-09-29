@@ -487,6 +487,40 @@ Source: found on 9/29 by the Fable sub-agent that checked the Codex finding in M
 - **Choice.** A new store method, `update_run_with_task`, updates a run and puts a task in one transaction. `finalize_run_with_task` now calls it. `_decide` uses it for the move to `audited` when the follow-up is due. A crash before the transaction leaves no task, and `resume` opens one, `interrupted`. If the sweep finished the run first, the conditional move fails, and the task isn't written either. Three tests cover the crash, the single write and the lost claim, and all three fail on the old code. The old test's expectation of two tasks is replaced.
 - **Alternative.** Open the task after the move to `audited`. A crash between would then lose the follow-up, because `resume` finishes the set by tier and doesn't know about the bank request.
 
+# Changes after the third audit
+
+A third independent audit on 9/29/26 (`governed-write-path-notes/fable-audit-3.md`), of `da469fe`, found no high or medium problem and 5 low ones. Every published number checked out. Four lows were code, and they are entries 57 to 60. The fifth was sentences in the design doc and the explainer, fixed there.
+
+## 57. A decline can't undo a recorded approval, and the retry that applies it says `applied`
+
+Source: third Fable audit, 9/29/26 (GWP3-1).
+
+- **Before.** Entry 47 made `approve` apply a record it found at `approved`, whatever the new call's decision was. After a crash between the approval and the apply, a `decline` posted the payable. The retry that did apply it answered `already_decided`, so the HTTP API said 409 for a call that did what was asked, and a second contention cancellation looked the same as a decision someone else made.
+- **Choice.** Only an `approve` call applies a record found at `approved`. It returns `applied` with the detail `applied_on_retry`, or `retryable` again, so the API answers 200 or 503. Any other decision returns `already_decided` with the detail `approved` and changes nothing. The README and the `decide` tool's description say that a recorded approval can't be withdrawn.
+- **Why not let a decline withdraw it.** The staleness pass applies an `approved` record within about 30 minutes whatever happens, and letting a decline race it would make the outcome depend on timing. Whether an approval should be withdrawable at all is Adam's call.
+
+## 58. A run-and-task transaction cancelled by contention falls back to the task first
+
+Source: third Fable audit, 9/29/26 (GWP3-2).
+
+- **Before.** M14 and entry 56 write the run and its task in one transaction. `update_run_with_task` handled a failed condition on either item and raised on anything else. A `TransactionConflict`, for example from an agent's search on the same run, reached the fail-closed handler. The handler finalized the run as `internal_error` with no task, no lease and no records, so nothing revisited it. The size fallback in `_finish` caught only moto's top-level `ValidationException`, and DynamoDB reports an oversized update in a transaction as a `ValidationError` cancellation reason.
+- **Choice.** `_update_run_with_task` in the orchestrator catches a cancellation that is not a failed condition and falls back to the order used before M14: the task first, then the run. The run keeps its lease until the task exists. `too_large` recognizes both shapes of the size error, and `_finish` uses it. Tests cancel the transaction once on each path, and inject the size error in both shapes.
+- **Left as is.** A crash inside the fallback, between its two writes, can still give a person a second task. It needs a cancellation and then a crash, and it can't lose a task.
+
+## 59. The sweep finalizes a run only if its lease ran out
+
+Source: third Fable audit, 9/29/26 (GWP3-3).
+
+- **Before.** `recover_stranded` re-read each run and skipped one whose lease was renewed (M10), but `resume` then read the run again and never looked at the lease. An agent's claim that landed between the two reads was finalized as `interrupted`, its valid proposal was discarded, and a person got a task for a run that was being handled.
+- **Choice.** The sweep passes its time to `resume` as `lease_expired_by`. For a run with no records, or with an incomplete set, the finalize is then conditional on the lease having run out before that time. A run someone claimed meanwhile is left alone, and the sweep reports it as `IN_PROGRESS`. `resume` called by hand keeps its old behavior.
+
+## 60. `resume` closes a set as incomplete only if it still is
+
+Source: third Fable audit, 9/29/26 (GWP3-4).
+
+- **Before.** `resume` read the run once. If the set was not marked complete, it closed the records as failed and then finalized the run with an unconditional update. A worker that outlived its lease could mark the set complete in between and apply part of it, while `resume` closed the rest. The set ended half applied, and the closed record was terminal. Only the long-lived MCP server can have such a worker, since the Lambda's timeout is shorter than the lease.
+- **Choice.** `resume` finalizes the run and opens its `interrupted` task first, in one transaction, on the condition that the set is still not complete and the run is in the state it read. Only then does it close the records. If the condition fails, it reads again once and finishes the set by tier. A worker whose move to `audited` comes second loses its claim and closes what it wrote as `claim_lost`. A crash before the records are closed leaves them to the staleness pass (M13).
+
 # The MCP server
 
 These entries are numbered M1 onward. They were written on the `mcp-server` branch, which merged into main on 9/28, so they could not collide with entries added on main meanwhile. New entries about the MCP server continue the M numbering.
