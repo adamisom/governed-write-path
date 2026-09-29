@@ -43,4 +43,4 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # No -q here: `pytest -q` on top of it printed no pass count, which is how the Codex review reported 181.
-markers = ["eval: runs whole eval cases end to end (about 25 seconds)"]
+markers = ["eval: runs whole eval cases end to end, directly and through the MCP server (about 4 minutes)"]

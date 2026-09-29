@@ -84,8 +84,8 @@ Requires [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync --all-extras
-uv run pytest -m "not eval"                     # unit tests, about 19 seconds
-uv run pytest                                   # everything, 349 tests including all 108 cases with both scripts, about 100 seconds
+uv run pytest -m "not eval"                     # unit tests, 219 of them, about 70 seconds
+uv run pytest                                   # everything, 676 tests including all 109 cases with both scripts, directly and through the MCP server, about 5 minutes
 uv run gwp eval --mode offline --out eval-out   # writes eval-out/eval-offline-cooperative-adversarial.md and .json
 uv run gwp generate-docs                        # re-render the case PDFs and check each one against its spec
 ```
@@ -162,6 +162,8 @@ The grader compares the run outcome, the ledger diff to the cent (payables with 
 `infra/terraform/` has an HTTP API, one Python Lambda (`gwp.api.handler`) that also processes each document in an asynchronous invocation of itself, since the model calls don't fit in an API request, the two DynamoDB tables, an S3 bucket for documents, a scheduled sweep that resumes runs whose lease ran out and lists stale audit records, a monthly budget alarm, and an optional S3 Vectors index. It has never been applied or validated. A test checks that the Lambda role grants every DynamoDB item action the code calls on each table and index. IAM has no separate transaction action, so a transaction needs only those item actions. The Lambda's reserved concurrency of 2 and the API throttle of 1 request a second cap how fast a public endpoint can spend on model calls.
 
 ## Layout
+
+`docs/explainer.html` is a guide to reading the code. It describes main at `550619a`, the 108-case eval set before the MCP server merged, so its line counts, test count and module table are for that commit, not for the current tree.
 
 ```
 src/gwp/
