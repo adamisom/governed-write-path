@@ -802,6 +802,13 @@ def _two_sweeps(orch, store):
     after_read, before_open = threading.Barrier(2, timeout=10), threading.Barrier(2, timeout=10)
     local = threading.local()
     real_list, real_new = store.list_audits, orch.ids.new
+    # moto copies a table before each transaction and restores the copy if the transaction fails, so across threads
+    # a failed transaction can undo one that committed meanwhile. DynamoDB isolates transactions; so does this lock.
+    real_transact, lock = store.client.transact_write_items, threading.Lock()
+
+    def transact_write_items(**kw):
+        with lock:
+            return real_transact(**kw)
 
     def list_audits(*a, **k):
         out = real_list(*a, **k)
@@ -824,13 +831,14 @@ def _two_sweeps(orch, store):
         except BaseException as e:  # noqa: BLE001 - reported below
             errors.append(e)
 
-    store.list_audits, orch.ids.new = list_audits, new
+    store.list_audits, orch.ids.new, store.client.transact_write_items = list_audits, new, transact_write_items
     threads = [threading.Thread(target=sweep, args=(i,)) for i in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     del store.list_audits, orch.ids.new
+    store.client.transact_write_items = real_transact
     assert not errors, errors
     assert [len(r) for r in results] == [1, 1], "both sweeps must have resumed the same run"
     return results[0] + results[1]
